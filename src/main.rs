@@ -1,27 +1,39 @@
-// resonance.rs - A high-fidelity spatial audio communication application
-// Main application entry point
-
 mod app;
-mod ui;
-mod network;
 mod audio;
+mod network;
+mod ui;
 
-#[tokio::main]
-async fn main() {
-    println!("Starting resonance.rs...");
+use app::App;
+use std::path::Path;
+
+fn main() {
+    let config_path = Path::new("config.toml");
     
-    // Initialize application configuration
-    let config = app::config::Config::default();
+    // Create a new app instance
+    let mut app = if config_path.exists() {
+        println!("Loading configuration from file");
+        let mut app = App::new();
+        if let Err(e) = app.load_config(config_path) {
+            eprintln!("Failed to load configuration: {}", e);
+        }
+        app
+    } else {
+        println!("Using default configuration");
+        App::new()
+    };
     
-    // Initialize the TUI
-    let mut tui = ui::tui::Tui::new(&config).expect("Failed to initialize TUI");
+    println!("Resonance audio communication application started");
+    println!("Running with user: {}", app.config().username);
     
-    // Initialize the session manager
-    let mut session = app::session::SessionManager::new(&config);
+    // Here we would run the application main loop
     
-    // Application loop
-    match app::run(config, &mut tui, &mut session).await {
-        Ok(_) => println!("Application terminated successfully."),
-        Err(e) => eprintln!("Application error: {}", e),
+    // Save configuration before exiting
+    if let Err(e) = app.save_config(config_path) {
+        eprintln!("Failed to save configuration: {}", e);
+    }
+    
+    let shutdown_result = app.shutdown();
+    if let Err(e) = shutdown_result {
+        eprintln!("Error during shutdown: {}", e);
     }
 }
