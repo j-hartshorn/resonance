@@ -1,8 +1,30 @@
 [package]
 name = "resonance"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "A high-fidelity spatial audio communication application"
+authors = ["resonance.rs team"]
 
 [dependencies]
+# Async runtime
+tokio = { version = "1.32", features = ["full"] }
+
+# WebRTC for audio communication
 webrtc = "0.12.0"
+
+# Audio processing
 webrtc-audio-processing = "0.4.0"
+audionumbus = "0.1.0"  # Spatial audio processing
+
+# Terminal UI
+ratatui = "0.23.0"
+crossterm = "0.27.0"  # Terminal handling for ratatui
+
+# Utility libraries
+anyhow = "1.0"     # Error handling
+thiserror = "1.0"  # Error definitions
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.10"
+futures = "0.3"    # Async utilities
