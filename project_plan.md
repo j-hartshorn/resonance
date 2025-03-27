@@ -36,7 +36,7 @@ A pure Rust implementation of WebRTC stack. Rewrite Pion WebRTC stack in Rust
     - Echo cancellation
     - Voice detection
 
-### `audionumbus`
+### `audionimbus`
 
 A Rust wrapper around Steam Audio that provides spatial audio capabilities with realistic occlusion, reverb, and HRTF effects, accounting for physical attributes and scene geometry.
 
@@ -45,3 +45,8 @@ A Rust wrapper around Steam Audio that provides spatial audio capabilities with 
 - Terminal interface
 - showing settings menue to allow config to be changed on the fly
 - a nice visualisation of the spectorgraph of each of the prticipants
+
+## Development
+
+Create a modular architecture and write tests for the functionality as you go.
+Follow a TDD approach, and make sure to run tests and correct if things don't function correctly.
