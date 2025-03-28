@@ -354,6 +354,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "audionimbus"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60ee290704c63f3bf873be24a018a57d3f67cdfc9aa8a4801d838effc5c562d9"
+dependencies = [
+ "audionimbus-sys",
+ "bitflags 2.9.0",
+]
+
+[[package]]
+name = "audionimbus-sys"
+version = "4.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e8879cb3699b2b1d30d6de19f493638d6f7a012c5f7f6cb3ae85953a5493325"
+dependencies = [
+ "bindgen 0.71.1",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2498,6 +2517,7 @@ name = "resonance"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audionimbus",
  "cpal",
  "crossterm",
  "env_logger 0.10.2",
