@@ -1,24 +1,36 @@
 mod audio;
 mod network;
+mod ui;
 
-use audio::{AudioCapture, AudioDeviceManager, SpatialAudioProcessor, VoiceProcessor};
+use audio::{AudioCapture, SpatialAudioProcessor, VoiceProcessor};
 use network::{SecurityModule, SignalingService, WebRtcManager};
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use ui::Participant;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting resonance.rs audio communication app");
 
-    // Stage 2.1: Audio Device Enumeration
-    println!("Available audio devices:");
-    let devices = AudioDeviceManager::enumerate_devices();
-    for (i, device) in devices.iter().enumerate() {
-        println!("  {}. {}", i + 1, device);
-    }
+    // Initialize components
+    let mut signaling = SignalingService::new();
+    signaling.connect().await?;
 
-    // Stage 2.2: Basic Audio Capture
-    println!("\nStarting audio capture...");
+    let mut webrtc = WebRtcManager::new();
+    webrtc.initialize()?;
+
+    let security = SecurityModule::new();
+    let voice_processor = VoiceProcessor::new()
+        .with_vad_threshold(0.05)
+        .with_echo_cancellation(true);
+
+    let mut spatial_processor = SpatialAudioProcessor::new();
+
+    let current_user = Participant::new("Me").with_position(0.0, 0.0, 0.0);
+    let participants = Arc::new(Mutex::new(vec![current_user.clone()]));
+
+    // Basic Audio Capture
     let mut capture = AudioCapture::new();
 
     // Set a callback to handle received audio data
@@ -29,66 +41,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start capture
     capture.start().await?;
-    println!("Audio capture started. Processing for 3 seconds...");
 
-    // Stage 2.3: Voice Processing
-    let voice_processor = VoiceProcessor::new()
-        .with_vad_threshold(0.05)
-        .with_echo_cancellation(true);
-
-    // Stage 2.4: Spatial Audio Processing
-    let mut spatial_processor = SpatialAudioProcessor::new();
-    spatial_processor.set_source_position(0.5, 0.0, 0.0); // Example position
-
-    // Stage 3.1: Signaling Service
-    println!("\nInitializing signaling service...");
-    let mut signaling = SignalingService::new();
-    signaling.connect().await?;
-    println!("Signaling service connected");
-
-    // Stage 3.2: WebRTC Integration
-    println!("Initializing WebRTC...");
-    let mut webrtc = WebRtcManager::new();
-    webrtc.initialize()?;
-    println!("WebRTC initialized");
-
-    // Stage 3.3: Security Module
-    println!("Setting up security...");
-    let mut security = SecurityModule::new();
-    let _key_pair = security.generate_key_pair()?;
-    println!("Security keys generated");
-
-    // Basic command processing
-    println!("\nEnter command ('/help' for commands, '/quit' to exit):");
-    io::stdout().flush()?;
-
-    // Process audio in the background while waiting for commands
-    let mut frames_processed = 0;
-    let max_frames = 10; // Just process a few frames for demo
+    // Process audio in the background
+    let voice_processor = Arc::new(Mutex::new(voice_processor));
+    let spatial_processor = Arc::new(Mutex::new(spatial_processor));
+    let participants_clone = Arc::clone(&participants);
 
     tokio::spawn(async move {
         while let Some(audio_data) = rx.recv().await {
             // Voice processing
-            let processed = voice_processor.process(audio_data);
+            let processed = {
+                let voice_processor = voice_processor.lock().unwrap();
+                voice_processor.process(audio_data)
+            };
 
-            // Voice activity detection
-            let has_voice = voice_processor.detect_voice_activity(&processed);
-            println!("Frame {}: Voice detected: {}", frames_processed, has_voice);
+            // Voice activity detection and update speaking status
+            let has_voice = {
+                let voice_processor = voice_processor.lock().unwrap();
+                voice_processor.detect_voice_activity(&processed)
+            };
+
+            // Update participants (including ourselves) with speaking status
+            let mut participants = participants_clone.lock().unwrap();
+            if !participants.is_empty() {
+                participants[0].is_speaking = has_voice;
+            }
 
             // Spatial audio processing (if voice detected)
             if has_voice {
-                let spatial_audio = spatial_processor.process(&processed);
-                println!("  Spatial audio output: {} samples", spatial_audio.len());
-            }
+                let spatial_audio = {
+                    let spatial_processor = spatial_processor.lock().unwrap();
+                    spatial_processor.process(&processed)
+                };
 
-            frames_processed += 1;
-            if frames_processed >= max_frames {
-                break;
+                // In a real app, send this spatial audio to other participants
+                // via WebRTC here
             }
         }
     });
 
     // Simple command loop
+    println!("\nEnter command ('/help' for commands, '/quit' to exit):");
+    io::stdout().flush()?;
+
     let mut command = String::new();
     loop {
         command.clear();
@@ -128,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         io::stdout().flush()?;
     }
 
-    // Stop capture and cleanup
+    // Cleanup before exit
     capture.stop().await?;
     webrtc.close_all_connections().await?;
     signaling.disconnect().await?;
