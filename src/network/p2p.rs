@@ -323,7 +323,7 @@ mod tests {
 
         // Public IPs should be allowed
         assert!(!is_blocked_ip(&"8.8.8.8".parse::<IpAddr>().unwrap()));
-        assert!(!is_blocked_ip(&"203.0.113.1".parse::<IpAddr>().unwrap()));
+        assert!(!is_blocked_ip(&"8.8.4.4".parse::<IpAddr>().unwrap()));
     }
 
     #[test]

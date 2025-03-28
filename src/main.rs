@@ -9,7 +9,7 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use ui::{qr_code::display_connection_options, Participant};
+use ui::{qr_code::display_connection_options, run_tui, Participant};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -135,7 +135,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Simple command loop
+    // Create a sharable app instance for the TUI
+    let shared_app = Arc::new(Mutex::new(app));
+
+    // Run the TUI
+    if let Err(e) = run_tui(shared_app.clone()).await {
+        eprintln!("TUI error: {}", e);
+    }
+
+    // Unwrap the app for cleanup
+    let mut app = match Arc::try_unwrap(shared_app) {
+        Ok(mutex) => mutex.into_inner()?,
+        Err(_) => {
+            eprintln!("Could not get exclusive ownership of App for cleanup");
+            // Create a dummy app for cleanup
+            let mut app = App::new();
+            app.initialize().await?;
+            app
+        }
+    };
+
+    // Cleanup before exit
+    audio_manager.stop_all_streams().await?;
+    capture.stop().await?;
+    app.shutdown().await?;
+
+    Ok(())
+
+    /*
+    // Original CLI command loop implementation - kept for reference
     println!("\nEnter command ('/help' for commands, '/quit' to exit):");
     io::stdout().flush()?;
 
@@ -243,12 +271,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         io::stdout().flush()?;
     }
-
-    // Cleanup before exit
-    audio_manager.stop_all_streams().await?;
-    capture.stop().await?;
-    app.shutdown().await?;
-
-    println!("Application shutdown complete");
-    Ok(())
+    */
 }
