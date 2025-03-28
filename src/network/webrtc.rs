@@ -1,72 +1,104 @@
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use uuid;
 use webrtc::api::{media_engine::MediaEngine, APIBuilder, API};
 use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::{configuration::RTCConfiguration, RTCPeerConnection};
 
-/// Represents a WebRTC peer connection
+/// Wrapper around a WebRTC peer connection with additional metadata
+#[derive(Clone)]
 pub struct PeerConnection {
-    pc: Arc<RTCPeerConnection>,
-    initialized: bool,
+    /// The underlying WebRTC connection
+    connection: Arc<RTCPeerConnection>,
+    /// Unique identifier for this connection
+    id: String,
+    /// Session ID this connection belongs to
+    session_id: String,
 }
 
 impl PeerConnection {
-    fn new(pc: Arc<RTCPeerConnection>) -> Self {
+    /// Creates a new peer connection wrapper
+    fn new(connection: Arc<RTCPeerConnection>, id: String, session_id: String) -> Self {
         Self {
-            pc,
-            initialized: true,
+            connection,
+            id,
+            session_id,
         }
     }
 
-    /// Check if the peer connection is initialized
+    /// Checks if the connection is initialized
     pub fn is_initialized(&self) -> bool {
-        self.initialized
+        true
     }
 
-    /// Create an SDP offer to initiate a connection
+    /// Creates an SDP offer for this connection
     pub async fn create_offer(&self) -> Result<RTCSessionDescription> {
-        let offer = self.pc.create_offer(None).await?;
-        self.pc.set_local_description(offer.clone()).await?;
+        let offer = self.connection.create_offer(None).await?;
+        self.connection.set_local_description(offer.clone()).await?;
         Ok(offer)
     }
 
-    /// Process an SDP answer from the remote peer
+    /// Sets a remote SDP answer
     pub async fn set_remote_answer(&self, answer: RTCSessionDescription) -> Result<()> {
-        self.pc.set_remote_description(answer).await?;
+        self.connection.set_remote_description(answer).await?;
         Ok(())
     }
 
-    /// Create an SDP answer to respond to an offer
+    /// Creates an SDP answer for this connection
     pub async fn create_answer(&self) -> Result<RTCSessionDescription> {
-        let answer = self.pc.create_answer(None).await?;
-        self.pc.set_local_description(answer.clone()).await?;
+        let answer = self.connection.create_answer(None).await?;
+        self.connection
+            .set_local_description(answer.clone())
+            .await?;
         Ok(answer)
     }
 
-    /// Process an SDP offer from the remote peer
+    /// Sets a remote SDP offer
     pub async fn set_remote_offer(&self, offer: RTCSessionDescription) -> Result<()> {
-        self.pc.set_remote_description(offer).await?;
+        self.connection.set_remote_description(offer).await?;
         Ok(())
+    }
+
+    /// Returns the session ID for this connection
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Returns the unique ID for this connection
+    pub fn id(&self) -> &str {
+        &self.id
     }
 }
 
-/// The WebRTC Manager handles the WebRTC functionality
+/// Manages WebRTC connections for audio communication
 pub struct WebRtcManager {
-    api: Option<API>,
-    peers: Mutex<Vec<Arc<PeerConnection>>>,
+    api: Option<webrtc::api::API>,
+    connections: Arc<Mutex<HashMap<String, PeerConnection>>>,
+}
+
+impl Clone for WebRtcManager {
+    fn clone(&self) -> Self {
+        // We can't clone the API, so we create a new instance with a None value
+        Self {
+            api: None,
+            connections: Arc::clone(&self.connections),
+        }
+    }
 }
 
 impl WebRtcManager {
-    /// Create a new WebRTC manager
+    /// Creates a new WebRTC manager
     pub fn new() -> Self {
         Self {
             api: None,
-            peers: Mutex::new(Vec::new()),
+            connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Initialize the WebRTC API
+    /// Initializes the WebRTC API
     pub fn initialize(&mut self) -> Result<()> {
         let media_engine = MediaEngine::default();
 
@@ -79,14 +111,14 @@ impl WebRtcManager {
         Ok(())
     }
 
-    /// Create a new peer connection
-    pub async fn create_peer_connection(&self) -> Result<Arc<PeerConnection>> {
+    /// Creates a new WebRTC peer connection
+    pub async fn create_peer_connection(&self, session_id: String) -> Result<PeerConnection> {
         let api = self
             .api
             .as_ref()
             .ok_or_else(|| anyhow!("WebRTC API not initialized"))?;
 
-        // Configure the peer connection
+        // Configure ICE servers (STUN/TURN)
         let config = RTCConfiguration {
             ice_servers: vec![RTCIceServer {
                 urls: vec!["stun:stun.l.google.com:19302".to_string()],
@@ -96,27 +128,66 @@ impl WebRtcManager {
         };
 
         // Create the peer connection
-        let pc = api.new_peer_connection(config).await?;
+        let peer_connection = api.new_peer_connection(config).await?;
 
-        // Create our wrapper
-        let peer = Arc::new(PeerConnection::new(Arc::new(pc)));
+        // Generate a unique ID for this connection
+        let conn_id = uuid::Uuid::new_v4().to_string();
 
-        // Store it in our list of peers
-        self.peers.lock().unwrap().push(peer.clone());
+        // Wrap the peer connection
+        let connection = PeerConnection::new(
+            Arc::new(peer_connection),
+            conn_id.clone(),
+            session_id.clone(),
+        );
 
-        Ok(peer)
+        // Store the connection
+        self.connections
+            .lock()
+            .unwrap()
+            .insert(conn_id, connection.clone());
+
+        Ok(connection)
     }
 
-    /// Close all peer connections
-    pub async fn close_all_connections(&self) -> Result<()> {
-        let peers = self.peers.lock().unwrap().clone();
+    /// Gets all active connections
+    pub fn get_connections(&self) -> Result<Vec<PeerConnection>> {
+        let connections = self.connections.lock().unwrap();
+        let result = connections.values().cloned().collect();
+        Ok(result)
+    }
 
-        for peer in peers {
-            peer.pc.close().await?;
+    /// Gets connections for a specific session
+    pub fn get_session_connections(&self, session_id: &str) -> Result<Vec<PeerConnection>> {
+        let connections = self.connections.lock().unwrap();
+        let result = connections
+            .values()
+            .filter(|conn| conn.session_id() == session_id)
+            .cloned()
+            .collect();
+        Ok(result)
+    }
+
+    /// Closes a specific connection
+    pub async fn close_connection(&self, conn_id: &str) -> Result<()> {
+        let mut connections = self.connections.lock().unwrap();
+
+        if let Some(connection) = connections.remove(conn_id) {
+            connection.connection.close().await?;
         }
 
-        // Clear the list of peers
-        self.peers.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// Closes all connections
+    pub async fn close_all_connections(&self) -> Result<()> {
+        let conn_ids: Vec<String> = {
+            let connections = self.connections.lock().unwrap();
+            connections.keys().cloned().collect()
+        };
+
+        for id in conn_ids {
+            self.close_connection(&id).await?;
+        }
 
         Ok(())
     }
@@ -126,8 +197,8 @@ impl WebRtcManager {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_webrtc_initialization() {
+    #[test]
+    fn test_webrtc_initialization() {
         let mut webrtc = WebRtcManager::new();
         assert!(webrtc.initialize().is_ok());
     }
@@ -137,8 +208,26 @@ mod tests {
         let mut webrtc = WebRtcManager::new();
         webrtc.initialize().unwrap();
 
-        let peer = webrtc.create_peer_connection().await;
-        assert!(peer.is_ok());
-        assert!(peer.unwrap().is_initialized());
+        let session_id = "test-session".to_string();
+        let peer = webrtc
+            .create_peer_connection(session_id.clone())
+            .await
+            .unwrap();
+
+        assert!(peer.is_initialized());
+        assert_eq!(peer.session_id(), session_id);
+
+        // Test getting connections
+        let connections = webrtc.get_connections().unwrap();
+        assert_eq!(connections.len(), 1);
+
+        // Test getting connections by session
+        let session_connections = webrtc.get_session_connections(&session_id).unwrap();
+        assert_eq!(session_connections.len(), 1);
+
+        // Test connection cleanup
+        webrtc.close_all_connections().await.unwrap();
+        let connections = webrtc.get_connections().unwrap();
+        assert_eq!(connections.len(), 0);
     }
 }

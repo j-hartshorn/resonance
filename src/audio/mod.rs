@@ -1,7 +1,9 @@
 mod capture;
-mod voice;
 mod spatial;
+pub mod streams;
+mod voice;
 
-pub use capture::{AudioDeviceManager, AudioCapture};
-pub use voice::VoiceProcessor;
+pub use capture::AudioCapture;
 pub use spatial::SpatialAudioProcessor;
+pub use streams::AudioStreamManager;
+pub use voice::VoiceProcessor;
