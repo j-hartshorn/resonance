@@ -7,10 +7,20 @@ It should feel like the people are in a room together, with multiple people talk
 
 - Hi-fidelity audio (as much as is practical to maintin low latency over a good internet connection)
 - Positional audio, using virtual rooom simulation
-- everyone can talk at once and still be heard. Audio is balanced and lifelike.
+  - Users are automatically arranged in a virtual circle facing inward, mimicking a natural conversation
+  - Spatial positioning is consistent across all users (if A hears B on the left, B hears A on the right)
+- Everyone can talk at once and still be heard. Audio is balanced and lifelike.
+- Session management:
+  - A user can create a session that others can join
+  - Users can join existing sessions via a temporary link
+  - Sessions continue uninterrupted if individual users leave
+  - Full peer-to-peer connections between all users in a session
+- User controls:
+  - Users can mute themselves
+  - Users can adjust volume of others
 - Designed for headphones
-- operated via an interactive CLI use interface
-- peer to peer secure communication using a temporary link and end to end encrypted connection
+- Operated via an interactive CLI use interface
+- Peer to peer secure communication using a temporary link and end to end encrypted connection
 
 ## Libraries
 
