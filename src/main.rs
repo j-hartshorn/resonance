@@ -8,6 +8,7 @@ use audio::{AudioCapture, AudioStreamManager, SpatialAudioProcessor, VoiceProces
 use std::env;
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use ui::{qr_code::display_connection_options, run_tui, Participant};
 
@@ -41,16 +42,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start capture
     capture.start().await?;
 
+    // Create a shared container for the latest audio data
+    let latest_audio_data = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let latest_audio_data_clone = latest_audio_data.clone();
+
     // Create participant for ourselves
     let current_user = Participant::new("Me").with_position(0.0, 0.0, 0.0);
     let participants = Arc::new(Mutex::new(vec![current_user.clone()]));
 
     // Create a reference to app.session_manager that will be moved to the background task
     let session_manager_ref = app.session_manager.clone();
-
-    // Create a channel for audio visualization data
-    let (vis_tx, vis_rx) = mpsc::channel::<Vec<f32>>(100);
-    let vis_tx_clone = vis_tx.clone();
 
     // Create a separate reference to app that implements has_active_connection()
     let mut app_check_connection = App::new();
@@ -67,6 +68,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let error_throttle_duration = std::time::Duration::from_secs(5);
     let participants_clone = Arc::clone(&participants);
 
+    // Clone the audio data reference for the audio processing task
+    let latest_audio_data_for_task = latest_audio_data.clone();
+
     // Process audio in the background
     tokio::spawn(async move {
         // Local instances for voice/audio processing
@@ -78,14 +82,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let spatial_processor = Arc::new(Mutex::new(SpatialAudioProcessor::new()));
 
         while let Some(audio_data) = rx.recv().await {
+            // Store the raw audio data for visualization
+            {
+                let mut audio_store = latest_audio_data_for_task.lock().unwrap();
+                *audio_store = audio_data.clone();
+            }
+
             // Apply voice processing
             let processed = {
                 let voice_processor = voice_processor.lock().unwrap();
                 voice_processor.process(audio_data.clone())
             };
-
-            // Forward the original audio data to the visualization channel
-            let _ = vis_tx_clone.send(audio_data.clone()).await;
 
             // Check for voice activity
             let has_voice = {
@@ -139,13 +146,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a sharable app instance for the TUI
     let shared_app = Arc::new(Mutex::new(app));
 
-    // Create and run the terminal UI
-    if let Err(e) = ui::terminal_ui::run_tui(shared_app.clone()).await {
+    // Create another shared data for the audio visualization
+    let audio_data_for_ui = latest_audio_data.clone();
+
+    // Run the original TUI function that handles keyboard events properly
+    if let Err(e) = run_tui_with_audio(shared_app.clone(), audio_data_for_ui).await {
         eprintln!("TUI error: {}", e);
     }
 
-    // Unwrap the app for cleanup
-    let mut app = match Arc::try_unwrap(shared_app) {
+    // Cleanup before exit
+    let mut app_for_cleanup = match Arc::try_unwrap(shared_app) {
         Ok(mutex) => mutex.into_inner()?,
         Err(_) => {
             eprintln!("Could not get exclusive ownership of App for cleanup");
@@ -156,121 +166,114 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Cleanup before exit
     audio_manager.stop_all_streams().await?;
     capture.stop().await?;
-    app.shutdown().await?;
+    app_for_cleanup.shutdown().await?;
 
     Ok(())
+}
 
-    /*
-    // Original CLI command loop implementation - kept for reference
-    println!("\nEnter command ('/help' for commands, '/quit' to exit):");
-    io::stdout().flush()?;
+// Modified version of run_tui that uses shared audio data
+async fn run_tui_with_audio(
+    app: Arc<Mutex<App>>,
+    audio_data: Arc<Mutex<Vec<f32>>>,
+) -> io::Result<()> {
+    // Initialize terminal
+    let mut terminal_ui = ui::terminal_ui::TerminalUI::new();
+    terminal_ui.initialize()?;
 
-    let mut command = String::new();
+    // Main event loop
+    let tick_rate = Duration::from_millis(33); // ~30 FPS
+    let mut last_tick = std::time::Instant::now();
+
     loop {
-        command.clear();
-        io::stdin().read_line(&mut command)?;
-        let trimmed = command.trim();
+        // Check if enough time has passed for a frame update
+        let timeout = tick_rate
+            .checked_sub(last_tick.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
 
-        match trimmed {
-            "/help" => {
-                println!("Available commands:");
-                println!("  /create - Create a new P2P session");
-                println!("  /join <link> - Join an existing session");
-                println!("  /leave - Leave the current session");
-                println!("  /status - Show current session status");
-                println!("  /quit - Exit the application");
-            }
-            "/create" => {
-                match app.create_p2p_session().await {
-                    Ok(session) => {
-                        // Create an audio stream for this session
-                        let _stream = audio_manager.create_stream(session.id.clone()).await?;
-
-                        // Display QR code and other sharing options
-                        display_connection_options(&session.connection_link)?;
+        // Poll for events
+        if let Some(event) = terminal_ui.poll_events(timeout)? {
+            match event {
+                crossterm::event::Event::Key(key_event) => {
+                    // Handle Ctrl+C for exit
+                    if key_event
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                        && key_event.code == crossterm::event::KeyCode::Char('c')
+                    {
+                        break;
                     }
-                    Err(e) => println!("Failed to create session: {}", e),
-                }
-            }
-            cmd if cmd.starts_with("/join ") => {
-                let link = &cmd[6..];
-                match app.join_p2p_session(link).await {
-                    Ok(_) => {
-                        if let Some(session) = app.current_session() {
-                            // Create an audio stream for this session
-                            let _stream = audio_manager.create_stream(session.id.clone()).await?;
 
-                            println!("Joined session successfully");
+                    if let Some(action) = terminal_ui.handle_key_event(key_event.code) {
+                        // First handle internal actions like copy
+                        if terminal_ui.handle_menu_action(action.clone()) {
+                            continue;
+                        }
 
-                            // Add streams for other participants
-                            for participant in &session.participants {
-                                if participant.name != "Me" {
-                                    audio_manager.add_participant_stream(&participant.name)?;
+                        let mut app_lock = app.lock().unwrap();
+                        match action {
+                            ui::MenuAction::Join => {
+                                // Prompt user for join link or create new session
+                                // For this example, we'll just create a new session
+                                if let Ok(session) = app_lock.create_p2p_session().await {
+                                    terminal_ui
+                                        .set_connection_link(Some(session.connection_link.clone()));
+
+                                    // Update participants
+                                    terminal_ui.update_participants(session.participants.clone());
                                 }
                             }
-                        }
-                    }
-                    Err(e) => println!("Failed to join session: {}", e),
-                }
-            }
-            "/leave" => {
-                match app.leave_session().await {
-                    Ok(_) => {
-                        // Stop audio streams
-                        audio_manager.stop_all_streams().await?;
-                        println!("Left session successfully");
-                    }
-                    Err(e) => println!("{}", e),
-                }
-            }
-            "/status" => {
-                if let Some(session) = app.current_session() {
-                    println!("Current session: {}", session.id);
-                    println!(
-                        "  Host: {}",
-                        if session.is_host {
-                            "You"
-                        } else {
-                            "Someone else"
-                        }
-                    );
-                    println!("  Participants:");
-
-                    for participant in &session.participants {
-                        println!(
-                            "    - {} {}",
-                            participant.name,
-                            if participant.is_speaking {
-                                "(speaking)"
-                            } else {
-                                ""
+                            ui::MenuAction::Leave => {
+                                if app_lock.has_active_connection().await {
+                                    let _ = app_lock.leave_session().await;
+                                    terminal_ui.set_connection_link(None);
+                                    terminal_ui.update_participants(vec![]);
+                                }
                             }
-                        );
+                            ui::MenuAction::CopyLink => {
+                                // Already handled in handle_menu_action
+                            }
+                            ui::MenuAction::Quit => break,
+                        }
                     }
-
-                    // Show connection state if available
-                    if let Some(conn_state) = app.connection_state().await {
-                        println!("  Connection: {:?}", conn_state);
-                    }
-                } else {
-                    println!("Not in a session");
                 }
-            }
-            "/quit" => {
-                println!("Shutting down...");
-                break;
-            }
-            _ => {
-                if !trimmed.is_empty() {
-                    println!("Unknown command. Type '/help' for available commands.");
-                }
+                _ => {}
             }
         }
 
-        io::stdout().flush()?;
+        // Update UI if it's time for a frame
+        if last_tick.elapsed() >= tick_rate {
+            // Update app state
+            {
+                let app_lock = app.lock().unwrap();
+
+                // Update participants if in a session
+                if let Some(session) = app_lock.current_session() {
+                    terminal_ui.update_participants(session.participants.clone());
+                }
+
+                // Get the latest audio data for visualization
+                let audio_data_snapshot = {
+                    let data = audio_data.lock().unwrap();
+                    data.clone()
+                };
+
+                // Only update if we have data
+                if !audio_data_snapshot.is_empty() {
+                    terminal_ui.update_audio_data(&audio_data_snapshot);
+                }
+            }
+
+            // Render UI
+            terminal_ui.render(&app.lock().unwrap())?;
+
+            last_tick = std::time::Instant::now();
+        }
     }
-    */
+
+    // Shutdown terminal
+    terminal_ui.shutdown()?;
+
+    Ok(())
 }

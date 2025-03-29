@@ -1,3 +1,9 @@
+use cpal::{
+    self,
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    Sample,
+};
+use ringbuf::{Consumer, HeapRb, Producer};
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
@@ -58,20 +64,52 @@ impl AudioDeviceManager {
     }
 
     pub fn enumerate_devices() -> Vec<AudioDevice> {
-        // In a real implementation, this would use cpal or similar to get actual devices
-        // For testing purposes, we'll return mock devices
-        vec![
-            AudioDevice {
+        let mut devices = Vec::new();
+
+        // Use cpal to get actual audio devices
+        let host = cpal::default_host();
+
+        // Get input devices
+        if let Ok(input_devices) = host.input_devices() {
+            for device in input_devices {
+                if let Ok(name) = device.name() {
+                    devices.push(AudioDevice {
+                        id: name.clone(),
+                        name,
+                        is_input: true,
+                    });
+                }
+            }
+        }
+
+        // Get output devices
+        if let Ok(output_devices) = host.output_devices() {
+            for device in output_devices {
+                if let Ok(name) = device.name() {
+                    devices.push(AudioDevice {
+                        id: name.clone(),
+                        name,
+                        is_input: false,
+                    });
+                }
+            }
+        }
+
+        // If no devices were found, return mock devices for testing
+        if devices.is_empty() {
+            devices.push(AudioDevice {
                 id: "input1".to_string(),
                 name: "Default Microphone".to_string(),
                 is_input: true,
-            },
-            AudioDevice {
+            });
+            devices.push(AudioDevice {
                 id: "output1".to_string(),
                 name: "Default Speakers".to_string(),
                 is_input: false,
-            },
-        ]
+            });
+        }
+
+        devices
     }
 
     pub fn select_input_device(&mut self, device: &AudioDevice) -> Result<(), AudioError> {
@@ -111,6 +149,8 @@ pub struct AudioCapture {
     is_active: bool,
     data_tx: Option<mpsc::Sender<Vec<f32>>>,
     cancel_token: Option<tokio::sync::oneshot::Sender<()>>,
+    #[allow(dead_code)]
+    audio_stream: Option<cpal::Stream>,
 }
 
 impl AudioCapture {
@@ -120,6 +160,7 @@ impl AudioCapture {
             is_active: false,
             data_tx: None,
             cancel_token: None,
+            audio_stream: None,
         }
     }
 
@@ -173,19 +214,139 @@ impl AudioCapture {
         // Clone the data tx for the capture task
         let data_tx = self.data_tx.clone();
 
-        // Start the capture task
+        // Set up real microphone capture using cpal
+        let host = cpal::default_host();
+        let device_name = self
+            .device
+            .as_ref()
+            .map(|d| d.id.clone())
+            .unwrap_or_default();
+
+        // Try to find the device by name, or use default input device
+        let device = host
+            .input_devices()
+            .map_err(|e| AudioError::new(&format!("Failed to get input devices: {}", e)))?
+            .find(|d| match d.name() {
+                Ok(name) => name == device_name,
+                Err(_) => false,
+            })
+            .or_else(|| host.default_input_device())
+            .ok_or_else(|| AudioError::new("No input device found"))?;
+
+        // Get supported configs and choose a reasonable one
+        let config = match device.default_input_config() {
+            Ok(config) => config,
+            Err(e) => {
+                return Err(AudioError::new(&format!(
+                    "Default config not supported: {}",
+                    e
+                )))
+            }
+        };
+
+        // Create a ring buffer for audio samples
+        let ring_size = 1024 * 8;
+        let rb = HeapRb::<f32>::new(ring_size);
+        let (mut prod, mut cons) = rb.split();
+
+        // Create stream for audio input
+        let err_fn = move |err| {
+            eprintln!("an error occurred on the audio stream: {}", err);
+        };
+
+        // Set up the actual audio input stream with cpal
+        let stream = match config.sample_format() {
+            cpal::SampleFormat::F32 => {
+                let stream = device
+                    .build_input_stream(
+                        &config.into(),
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            // Push the incoming audio data to the ring buffer
+                            for &sample in data {
+                                let _ = prod.push(sample);
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| {
+                        AudioError::new(&format!("Failed to build input stream: {}", e))
+                    })?;
+                stream
+            }
+            cpal::SampleFormat::I16 => {
+                let stream = device
+                    .build_input_stream(
+                        &config.into(),
+                        move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                            // Convert i16 samples to f32 and push to the ring buffer
+                            for &sample in data {
+                                // Normalize i16 to f32 range
+                                let normalized = sample as f32 / i16::MAX as f32;
+                                let _ = prod.push(normalized);
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| {
+                        AudioError::new(&format!("Failed to build input stream: {}", e))
+                    })?;
+                stream
+            }
+            cpal::SampleFormat::U16 => {
+                let stream = device
+                    .build_input_stream(
+                        &config.into(),
+                        move |data: &[u16], _: &cpal::InputCallbackInfo| {
+                            // Convert u16 samples to f32 and push to the ring buffer
+                            for &sample in data {
+                                // Normalize u16 to f32 range, centered around 0
+                                let normalized = (sample as f32 / u16::MAX as f32) * 2.0 - 1.0;
+                                let _ = prod.push(normalized);
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| {
+                        AudioError::new(&format!("Failed to build input stream: {}", e))
+                    })?;
+                stream
+            }
+            _ => return Err(AudioError::new("Unsupported sample format")),
+        };
+
+        // Start the stream
+        stream
+            .play()
+            .map_err(|e| AudioError::new(&format!("Failed to start audio stream: {}", e)))?;
+
+        // Store the stream to keep it alive
+        self.audio_stream = Some(stream);
+
+        // Start a task to read from the ring buffer and send data to the callback
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(20));
+            let mut buffer = Vec::with_capacity(1024);
 
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        // Generate dummy audio data (in real implementation, this would be from the device)
-                        let audio_data = generate_test_audio();
+                        // Read available samples from the ring buffer
+                        buffer.clear();
+                        while let Some(sample) = cons.pop() {
+                            buffer.push(sample);
+                            if buffer.len() >= 1024 {
+                                break;
+                            }
+                        }
 
-                        // Send it to our callback handler if one exists
-                        if let Some(tx) = &data_tx {
-                            let _ = tx.send(audio_data).await;
+                        // Send audio data if we have enough samples and a channel
+                        if !buffer.is_empty() {
+                            if let Some(tx) = &data_tx {
+                                let _ = tx.send(buffer.clone()).await;
+                            }
                         }
                     }
                     _ = &mut cancel_rx => {
@@ -195,6 +356,7 @@ impl AudioCapture {
             }
         });
 
+        // Don't print debug messages that would interfere with the UI
         self.is_active = true;
         Ok(())
     }
@@ -208,6 +370,9 @@ impl AudioCapture {
         if let Some(cancel_token) = self.cancel_token.take() {
             let _ = cancel_token.send(());
         }
+
+        // Stop the audio stream
+        self.audio_stream = None;
 
         self.is_active = false;
         Ok(())

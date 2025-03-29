@@ -500,9 +500,8 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
                     terminal_ui.update_participants(session.participants.clone());
                 }
 
-                // Use real audio data from the audio module
-                let audio_data = audio::generate_test_audio();
-                terminal_ui.update_audio_data(&audio_data);
+                // Note: Audio data is now updated directly from the microphone input
+                // in the main thread, so we don't need to generate test audio here
             }
 
             // Render UI
