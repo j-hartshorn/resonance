@@ -340,23 +340,8 @@ impl Widget for AudioVisualizationWidget {
             for y in 0..bar_height {
                 let current_y = inner_area.y + inner_area.height - y - 1;
 
-                // Color gradient based on frequency range
-                let style = if i < spectrum_data.len() / 5 {
-                    // Low bass frequencies - blue
-                    Style::default().fg(Color::Blue)
-                } else if i < 2 * spectrum_data.len() / 5 {
-                    // Low-mid frequencies - cyan
-                    Style::default().fg(Color::Cyan)
-                } else if i < 3 * spectrum_data.len() / 5 {
-                    // Mid frequencies - green
-                    Style::default().fg(Color::Green)
-                } else if i < 4 * spectrum_data.len() / 5 {
-                    // Upper-mid frequencies - yellow
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    // High frequencies - red
-                    Style::default().fg(Color::Red)
-                };
+                // Use a single consistent color for all frequency bars
+                let style = Style::default().fg(Color::Cyan);
 
                 // Draw the bar
                 for x in start_x..end_x {
