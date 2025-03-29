@@ -27,9 +27,9 @@ impl AudioVisualizationWidget {
             peak_levels: Arc::new(Mutex::new(Vec::new())),
             spectrum_data: Arc::new(Mutex::new(Vec::new())),
             spectrum_history: Arc::new(Mutex::new(Vec::new())),
-            max_samples: 2048, // Increased for better low-frequency resolution
-            num_bins: 24,      // Number of frequency bins to display
-            history_length: 3, // Number of frames to average
+            max_samples: 0248, // Increased for better low-frequency resolution
+            num_bins: 64,      // Adjusted number for better display with terminal widths
+            history_length: 8, // Increased frames to average for smoother display
         }
     }
 
@@ -113,16 +113,15 @@ impl AudioVisualizationWidget {
 
             // Apply a more dramatic curve to suppress small amplitudes
             // and enhance medium-to-loud sounds (better for speech)
-            // Using a higher noise floor (-45dB instead of -60dB)
-            if *mag < -45.0 {
+            // Using a higher noise floor (-30dB instead of -35dB)
+            if *mag < -30.0 {
                 *mag = 0.0; // Stronger noise gate to reduce background noise
             } else {
                 // Normalize to 0.0 - 1.0 range with emphasis on speech levels
-                *mag = (*mag + 45.0) / 45.0; // Map -45dB..0dB to 0..1
+                *mag = (*mag + 30.0) / 30.0; // Map -30dB..0dB to 0..1
 
                 // Apply non-linear curve to enhance mid-range values (speech volumes)
-                // Using a cubic function for more dramatic effect on medium levels
-                *mag = (*mag * *mag * *mag) * 1.5; // Cubic to enhance contrast
+                *mag = (*mag * *mag * 0.8) + (*mag * 0.2); // Blend of square curve and linear
                 *mag = mag.max(0.0).min(1.0); // Clamp to 0-1
             }
         }
@@ -131,73 +130,85 @@ impl AudioVisualizationWidget {
         // Use a logarithmic frequency scale to focus more on lower frequencies (where voice is)
         let mut new_spectrum = Vec::with_capacity(self.num_bins);
 
-        // Frequency ranges oriented towards vocal content
-        // Speech is typically 85Hz-255Hz for fundamentals, with content up to ~8kHz
+        // Frequency ranges oriented towards vocal content with more bins
         if !magnitudes.is_empty() {
             let sample_rate = 44100.0; // Assuming 44.1kHz sample rate
             let nyquist = sample_rate / 2.0;
             let freq_per_bin = nyquist / magnitudes.len() as f32;
 
-            // Revised frequency bands with more even spacing
-            // Particularly addressing the issue with the second band
-            let freq_bands = [
-                // Low end (less prone to false triggers)
-                120.0, 150.0, 180.0, 220.0, 260.0,
-                // Mid-range (female voice fundamentals)
-                300.0, 350.0, 420.0, 500.0, 600.0,
-                // Upper mid-range (important for speech clarity)
-                750.0, 900.0, 1100.0, 1300.0, 1600.0, // Presence and brilliance
-                2000.0, 2500.0, 3200.0, 4000.0, 5000.0, // Upper frequencies
-                6300.0, 8000.0, 10000.0, 13000.0, 16000.0,
-            ];
+            // Start at a higher frequency to avoid very low frequency noise
+            let min_freq: f32 = 120.0; // Raised from 85Hz to avoid sub-bass noise
+            let max_freq: f32 = 12000.0; // Lowered from 16kHz to focus more on vocal range
 
-            // Apply additional low frequency attenuation for first few bands
-            let low_freq_attenuation = [
-                0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
-            ];
+            // Calculate the frequency boundaries for each bin
+            // Using a logarithmic distribution to focus more on lower frequencies
+            let mut bin_boundaries = Vec::with_capacity(self.num_bins + 1);
 
-            // Calculate spectrum based on these bands
-            for (i, &freq) in freq_bands.iter().enumerate() {
-                if i == freq_bands.len() - 1 || i >= self.num_bins {
-                    break;
-                }
+            for i in 0..=self.num_bins {
+                let t = i as f32 / self.num_bins as f32;
+                // Logarithmic mapping between min_freq and max_freq
+                let freq = min_freq * (max_freq / min_freq).powf(t);
+                bin_boundaries.push(freq);
+            }
 
-                let start_bin = (freq / freq_per_bin) as usize;
-                let end_bin = (freq_bands[i + 1] / freq_per_bin) as usize;
+            // Calculate spectrum based on these frequency bands
+            for i in 0..self.num_bins {
+                let start_freq = bin_boundaries[i];
+                let end_freq = bin_boundaries[i + 1];
 
-                let start = start_bin.min(magnitudes.len() - 1);
+                let start_bin = (start_freq / freq_per_bin).round() as usize;
+                let end_bin = (end_freq / freq_per_bin).round() as usize;
+
+                let start = start_bin.min(magnitudes.len().saturating_sub(1));
                 let end = end_bin.min(magnitudes.len());
 
                 if start < end {
-                    let mut avg_magnitude =
-                        magnitudes[start..end].iter().sum::<f32>() / (end - start) as f32;
+                    // Calculate average magnitude in this frequency band
+                    let band_width = end - start;
+                    let mut sum = 0.0;
+                    let mut count = 0;
 
-                    // Apply low frequency attenuation
-                    if i < low_freq_attenuation.len() {
-                        avg_magnitude *= low_freq_attenuation[i];
+                    for j in start..end {
+                        sum += magnitudes[j];
+                        count += 1;
                     }
 
-                    // Apply compensation for human hearing response
-                    // We're less sensitive to low frequencies, so boost them slightly
-                    if i > 5 && i < 15 {
-                        avg_magnitude *= 1.2; // Boost mid frequencies where vocals are most present
+                    // Calculate weighted average with emphasis on peaks
+                    let mut avg_magnitude = if count > 0 { sum / count as f32 } else { 0.0 };
+
+                    // Apply frequency-dependent processing
+                    if i < 4 {
+                        // For the lowest frequencies, apply stronger attenuation and a noise floor
+                        avg_magnitude *= 0.4 + (i as f32 * 0.15); // Gradually increase from 0.4 to 1.0
+
+                        // Additional filtering for the very lowest bands which can be noisy
+                        if avg_magnitude < 0.15 {
+                            avg_magnitude = 0.0; // Local noise gate for low frequencies
+                        }
+                    } else if i >= 4 && i < 12 {
+                        // For vocal fundamental range, boost slightly
+                        avg_magnitude *= 1.2;
+                    } else if i >= 20 {
+                        // Boost high frequencies which are typically quieter
+                        avg_magnitude *= 1.4;
                     }
+
+                    // Add a small baseline value to create a visible noise floor
+                    let noise_floor = 0.07; // Increased from 0.05 for better visibility
+                    avg_magnitude = avg_magnitude.max(noise_floor);
 
                     new_spectrum.push(avg_magnitude);
                 } else {
-                    new_spectrum.push(0.0);
+                    // If we couldn't calculate a real value, use the noise floor
+                    new_spectrum.push(0.07);
                 }
             }
-
-            // Ensure we have exactly num_bins
-            new_spectrum.resize(self.num_bins, 0.0);
         } else {
-            // Fill with zeros if no data
-            new_spectrum.resize(self.num_bins, 0.0);
+            // Fill with baseline noise floor values if no data
+            new_spectrum.resize(self.num_bins, 0.07);
         }
 
-        // Apply temporal smoothing using a moving average
+        // Apply temporal smoothing using a moving average with extra weight on recent frames
         let mut history = self.spectrum_history.lock().unwrap();
 
         // Add new spectrum to history
@@ -211,15 +222,15 @@ impl AudioVisualizationWidget {
         // Calculate the moving average
         let mut spectrum = self.spectrum_data.lock().unwrap();
         spectrum.clear();
+        spectrum.resize(self.num_bins, 0.0);
 
         if !history.is_empty() {
-            spectrum.resize(self.num_bins, 0.0);
-
             // Calculate weighted moving average with more weight to recent frames
             let mut total_weight = 0.0;
 
             for (i, frame) in history.iter().enumerate() {
-                let weight = (i + 1) as f32 * 1.5; // More recent frames get higher weight
+                // Exponential weighting - very recent frames matter more
+                let weight = (2.0f32).powf(i as f32);
                 total_weight += weight;
 
                 for (bin, &value) in frame.iter().enumerate() {
@@ -290,24 +301,46 @@ impl Widget for AudioVisualizationWidget {
 
         // Draw frequency spectrum bars
         let max_height = inner_area.height;
-        let bar_width = inner_area.width / spectrum_data.len() as u16;
-        let bar_width = bar_width.max(1); // Ensure minimum width of 1
 
-        // Draw small indicator lines at the bottom for all bars
-        for i in 0..spectrum_data.len() {
-            let x = inner_area.x + (i as u16 * bar_width);
+        // Calculate bar widths to fill the entire area evenly
+        // Ensure we use the full width of the display
+        let total_bars = spectrum_data.len();
+        let total_width = inner_area.width as usize;
+
+        // Calculate bar positions to distribute them evenly across the width
+        let positions: Vec<(u16, u16)> = (0..total_bars)
+            .map(|i| {
+                let start = inner_area.x + (i as u16 * inner_area.width) / total_bars as u16;
+                let end = inner_area.x + ((i + 1) as u16 * inner_area.width) / total_bars as u16;
+                (start, end)
+            })
+            .collect();
+
+        // Draw small indicator lines at the bottom for frequency bands
+        for (start, end) in &positions {
+            let x = (*start + *end) / 2; // Center of the bar
             let base_y = inner_area.y + inner_area.height - 1;
 
             // Draw a small mark at the bottom for each bar position
             let style = Style::default().fg(Color::DarkGray);
-            buf.get_mut(x + bar_width / 2, base_y)
-                .set_symbol("-")
-                .set_style(style);
+            buf.get_mut(x, base_y).set_symbol("-").set_style(style);
         }
 
+        // Draw the actual frequency bars
         for (i, &magnitude) in spectrum_data.iter().enumerate() {
-            // Apply a slightly stronger scaling curve for better visual dynamics
-            let scaled_magnitude = magnitude.powf(1.5); // Using power 1.5 for better scaling
+            if i >= positions.len() {
+                continue;
+            }
+
+            let (start, end) = positions[i];
+            let bar_width = end.saturating_sub(start);
+
+            if bar_width == 0 {
+                continue;
+            }
+
+            // Apply slight scaling for better visualization
+            let scaled_magnitude = magnitude.powf(1.3);
             let bar_height = (scaled_magnitude * max_height as f32) as u16;
             let bar_height = bar_height.min(max_height);
 
@@ -315,9 +348,6 @@ impl Widget for AudioVisualizationWidget {
             if bar_height == 0 {
                 continue;
             }
-
-            // Calculate the x position for this bar
-            let x = inner_area.x + (i as u16 * bar_width);
 
             // Draw the bar from bottom to top
             for y in 0..bar_height {
@@ -342,9 +372,9 @@ impl Widget for AudioVisualizationWidget {
                 };
 
                 // Draw the portion of the bar at this height
-                for bar_x in 0..bar_width {
-                    if x + bar_x < inner_area.x + inner_area.width {
-                        buf.get_mut(x + bar_x, current_y)
+                for bar_x in start..end {
+                    if bar_x < inner_area.x + inner_area.width {
+                        buf.get_mut(bar_x, current_y)
                             .set_symbol(symbols::block::FULL)
                             .set_style(style);
                     }
