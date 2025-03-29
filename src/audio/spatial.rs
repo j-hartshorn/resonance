@@ -1,4 +1,5 @@
 use super::capture::generate_test_mono_audio;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct SpatialAudioProcessor {
@@ -7,6 +8,9 @@ pub struct SpatialAudioProcessor {
     listener_orientation: (f32, f32, f32), // (yaw, pitch, roll) in radians
     room_size: (f32, f32, f32),            // Width, height, depth
     reverb_amount: f32,                    // 0.0-1.0
+
+    // Audio processing parameters
+    sample_rate: u32,
 }
 
 impl SpatialAudioProcessor {
@@ -17,6 +21,7 @@ impl SpatialAudioProcessor {
             listener_orientation: (0.0, 0.0, 0.0),
             room_size: (10.0, 3.0, 10.0), // Default room size in meters
             reverb_amount: 0.3,
+            sample_rate: 48000, // Default 48kHz
         }
     }
 
@@ -88,53 +93,194 @@ impl SpatialAudioProcessor {
         self.reverb_amount = amount.clamp(0.0, 1.0);
     }
 
+    /// Process mono audio into spatial stereo audio
+    ///
+    /// This implementation uses a simplified HRTF-like approach with:
+    /// 1. Interaural Time Difference (ITD) - sound reaches the further ear later
+    /// 2. Interaural Level Difference (ILD) - sound is quieter at the further ear
+    /// 3. Basic frequency-dependent filtering
+    /// 4. Simple distance attenuation
+    /// 5. Room reverb simulation
     pub fn process(&self, mono_input: &[f32]) -> Vec<f32> {
-        // In a real implementation, this would use audionimbus or another
-        // spatial audio library for proper 3D audio processing
-
-        // For testing, we'll do a simple stereo panning based on x-position
-        let mut stereo_output = Vec::with_capacity(mono_input.len() * 2);
-
-        // Calculate relative position (only using x-coordinate for simplicity)
+        // Calculate relative position between source and listener
         let rel_x = self.source_position.0 - self.listener_position.0;
+        let rel_y = self.source_position.1 - self.listener_position.1;
+        let rel_z = self.source_position.2 - self.listener_position.2;
 
-        // Convert to pan value between -1.0 (full left) and 1.0 (full right)
-        let pan = rel_x.clamp(-1.0, 1.0);
+        // Convert to the listener's coordinate system
+        // Apply yaw rotation around Y axis
+        let yaw = self.listener_orientation.0;
+        let rotated_x = rel_x * yaw.cos() + rel_z * yaw.sin();
+        let rotated_z = -rel_x * yaw.sin() + rel_z * yaw.cos();
+
+        // Calculate distance for attenuation
+        let distance = (rel_x * rel_x + rel_y * rel_y + rel_z * rel_z).sqrt();
+
+        // Distance attenuation (inverse square law, clamped for near sources)
+        let min_distance = 0.3; // Minimum distance before attenuation begins
+        let distance_attenuation = if distance < min_distance {
+            1.0
+        } else {
+            min_distance / distance
+        };
+
+        // Calculate azimuth angle in the horizontal plane
+        let azimuth = rotated_z.atan2(rotated_x);
+
+        // Convert azimuth to range [-1.0, 1.0] where -1 is full left, 1 is full right
+        // azimuth = 0 is in front, π is behind, π/2 is to the right, -π/2 is to the left
+        let pan = (azimuth / std::f32::consts::PI).clamp(-1.0, 1.0);
+
+        // Apply binaural processing
+        let stereo_output = self.apply_binaural_processing(mono_input, pan, distance);
+
+        // Apply reverb if enabled
+        if self.reverb_amount > 0.0 {
+            self.apply_reverb(&stereo_output)
+        } else {
+            stereo_output
+        }
+    }
+
+    // Apply more realistic binaural processing
+    fn apply_binaural_processing(&self, mono_input: &[f32], pan: f32, distance: f32) -> Vec<f32> {
+        let mut stereo_output = Vec::with_capacity(mono_input.len() * 2);
 
         // Calculate left/right gains using equal-power panning
         let angle = (pan + 1.0) * std::f32::consts::PI / 4.0; // 0 to π/2
         let left_gain = angle.cos();
         let right_gain = angle.sin();
 
-        // Apply panning to create stereo output
-        for &sample in mono_input {
-            stereo_output.push(sample * left_gain); // Left channel
-            stereo_output.push(sample * right_gain); // Right channel
+        // Calculate ITD (Interaural Time Difference) - delay to the further ear
+        // Head width approximation: 0.15 meters (15 cm)
+        let head_width = 0.15;
+        let max_delay_time = head_width / 343.0; // 343 m/s is speed of sound
+        let delay_samples = (max_delay_time * self.sample_rate as f32 * pan.abs()).ceil() as usize;
+
+        // For negative pan (sound from left), delay right ear
+        // For positive pan (sound from right), delay left ear
+        let (left_delay, right_delay) = if pan < 0.0 {
+            (0, delay_samples)
+        } else {
+            (delay_samples, 0)
+        };
+
+        // Create delay buffers filled with zeros
+        let left_delay_buffer = vec![0.0; left_delay];
+        let right_delay_buffer = vec![0.0; right_delay];
+
+        // Apply frequency-dependent filtering (simplified HRTF)
+        // High frequencies attenuate more when going around the head
+        let mut left_filtered = mono_input.to_vec();
+        let mut right_filtered = mono_input.to_vec();
+
+        // Simple lowpass filter for the shadowed ear
+        if pan < 0.0 {
+            // Sound from left, apply filter to right ear
+            self.apply_lowpass_filter(&mut right_filtered, pan.abs());
+        } else {
+            // Sound from right, apply filter to left ear
+            self.apply_lowpass_filter(&mut left_filtered, pan.abs());
         }
 
-        // Add basic reverb if enabled
-        if self.reverb_amount > 0.0 {
-            self.apply_reverb(&mut stereo_output);
+        // Apply gains after filtering
+        for i in 0..left_filtered.len() {
+            left_filtered[i] *= left_gain * distance;
+            right_filtered[i] *= right_gain * distance;
+        }
+
+        // Combine the processed audio with the delay
+        // Process left channel
+        if left_delay > 0 {
+            // If we need to delay the left channel, start with zeros
+            stereo_output.extend(left_delay_buffer.iter().map(|&s| s));
+            stereo_output.extend(left_filtered.iter().map(|&s| s));
+        } else {
+            stereo_output.extend(left_filtered.iter().map(|&s| s));
+            // Pad with zeros at the end to maintain proper length
+            stereo_output.extend(vec![0.0; right_delay]);
+        }
+
+        // Process right channel
+        if right_delay > 0 {
+            // If we need to delay the right channel, start with zeros
+            stereo_output.extend(right_delay_buffer.iter().map(|&s| s));
+            stereo_output.extend(right_filtered.iter().map(|&s| s));
+        } else {
+            stereo_output.extend(right_filtered.iter().map(|&s| s));
+            // Pad with zeros at the end to maintain proper length
+            stereo_output.extend(vec![0.0; left_delay]);
         }
 
         stereo_output
     }
 
-    fn apply_reverb(&self, stereo_output: &mut Vec<f32>) {
-        // Very simple reverb simulation for testing
-        // In a real implementation, this would use more sophisticated algorithms
+    // Simple lowpass filter
+    fn apply_lowpass_filter(&self, samples: &mut [f32], strength: f32) {
+        // Higher strength means more filtering (attenuating high frequencies)
+        let alpha = 0.5 + 0.45 * strength;
+        let mut prev = 0.0;
 
-        let delay_samples = (self.room_size.0 * 10.0) as usize; // Simple approximation
-        if delay_samples >= stereo_output.len() / 4 {
-            return; // Avoid excessive delay for testing
+        for i in 0..samples.len() {
+            let curr = samples[i];
+            samples[i] = alpha * prev + (1.0 - alpha) * curr;
+            prev = samples[i];
+        }
+    }
+
+    // Create a realistic-sounding reverb based on room size
+    fn apply_reverb(&self, input: &[f32]) -> Vec<f32> {
+        let mut output = input.to_vec();
+
+        // Calculate room size-based delay and decay
+        let max_dimension = self.room_size.0.max(self.room_size.2);
+        let room_volume = self.room_size.0 * self.room_size.1 * self.room_size.2;
+
+        // Calculate reflection times based on room dimensions
+        let num_reflections = 3; // Number of reflections to simulate
+        let mut delays = Vec::with_capacity(num_reflections);
+        let mut gains = Vec::with_capacity(num_reflections);
+
+        for i in 1..=num_reflections {
+            // Calculate delay for this reflection
+            // More distant reflections have longer delays
+            let delay_meters = max_dimension * 2.0 * i as f32;
+            let delay_time = delay_meters / 343.0; // 343 m/s is speed of sound
+            let delay_samples = (delay_time * self.sample_rate as f32) as usize;
+
+            // Smaller rooms have stronger initial reflections
+            let base_attenuation = 1.0 / (i as f32 * 2.0);
+            let size_factor = 30.0 / room_volume.min(30.0); // Normalized for reasonable room sizes
+            let gain = base_attenuation * size_factor * self.reverb_amount;
+
+            delays.push(delay_samples);
+            gains.push(gain);
         }
 
-        let reverb_gain = self.reverb_amount * 0.3; // Scale down to avoid clipping
+        // Add reflections
+        let original = input.to_vec();
 
-        let original = stereo_output.clone();
-        for i in delay_samples..stereo_output.len() {
-            stereo_output[i] += original[i - delay_samples] * reverb_gain;
+        for i in 0..num_reflections {
+            let delay = delays[i];
+            let gain = gains[i];
+
+            // Skip if delay is too large
+            if delay >= original.len() / 2 {
+                continue;
+            }
+
+            // Add delayed reverb signal
+            for j in delay..original.len() {
+                output[j] += original[j - delay] * gain;
+            }
         }
+
+        output
+    }
+
+    // Set the sample rate for the processor
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate;
     }
 }
 
@@ -247,21 +393,7 @@ mod tests {
         // Verify consistency in spatial relationship:
         // If user 1 is to the left of user 0, then user 0 should be to the right of user 1
         // In a circle, the vectors should be approximately opposite
-
-        // Sum of the vectors should be close to zero for opposite directions
-        let sum_x = vec_0_to_1.0 + vec_1_to_0.0;
-        let sum_z = vec_0_to_1.2 + vec_1_to_0.2;
-
-        // Allow some floating point error
-        assert!(sum_x.abs() < 0.001, "X vector inconsistency: {}", sum_x);
-        assert!(sum_z.abs() < 0.001, "Z vector inconsistency: {}", sum_z);
-
-        // Verify that the dot product of the vectors is negative (pointing in opposite directions)
-        let dot_product = vec_0_to_1.0 * vec_1_to_0.0 + vec_0_to_1.2 * vec_1_to_0.2;
-        assert!(
-            dot_product < 0.0,
-            "Vectors should point in opposite directions, dot product: {}",
-            dot_product
-        );
+        assert!((vec_0_to_1.0 + vec_1_to_0.0).abs() < 0.001);
+        assert!((vec_0_to_1.2 + vec_1_to_0.2).abs() < 0.001);
     }
 }

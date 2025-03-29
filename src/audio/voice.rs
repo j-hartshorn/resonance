@@ -1,20 +1,25 @@
 use super::capture::{
     generate_test_audio_with_echo, generate_test_silence, generate_test_speech, measure_echo_level,
 };
+use std::sync::{Arc, Mutex};
 
+// Voice processor for handling microphone audio
 #[derive(Clone)]
 pub struct VoiceProcessor {
     vad_threshold: f32,
     echo_cancellation_enabled: bool,
     muted: bool,
+    // We'll store the far end buffer for echo cancellation
+    far_end_buffer: Arc<Mutex<Vec<f32>>>,
 }
 
 impl VoiceProcessor {
     pub fn new() -> Self {
         Self {
-            vad_threshold: 0.1, // Arbitrary threshold for voice activity detection
+            vad_threshold: 0.05, // Lower threshold for more sensitive voice detection
             echo_cancellation_enabled: true,
             muted: false,
+            far_end_buffer: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -52,40 +57,65 @@ impl VoiceProcessor {
             return vec![0.0; input.len()];
         }
 
-        // In a real implementation, this would use webrtc-audio-processing
-        // or another library for actual voice processing
-
-        // For testing purposes, we'll implement basic simulations
-
+        // Clone the input for processing
         let mut output = input.clone();
 
         // Apply echo cancellation if enabled
         if self.echo_cancellation_enabled {
-            output = self.apply_echo_cancellation(output);
+            // Get the far end audio for reference
+            let far_end = self.far_end_buffer.lock().unwrap().clone();
+
+            if !far_end.is_empty() {
+                output = self.apply_echo_cancellation(output, &far_end);
+            }
         }
 
         output
     }
 
+    // Set the far-end audio (what's coming from the speakers)
+    pub fn set_far_end_audio(&mut self, audio: &[f32]) {
+        let mut far_end = self.far_end_buffer.lock().unwrap();
+        *far_end = audio.to_vec();
+    }
+
     pub fn detect_voice_activity(&self, audio: &[f32]) -> bool {
-        // Simple VAD: check if the audio energy exceeds a threshold
+        // Simple energy-based voice activity detection
         let energy = audio.iter().map(|&sample| sample.powi(2)).sum::<f32>() / audio.len() as f32;
         energy > self.vad_threshold
     }
 
-    fn apply_echo_cancellation(&self, input: Vec<f32>) -> Vec<f32> {
-        // Simple simulation of echo cancellation
-        // In a real implementation, this would use more sophisticated algorithms
+    // Basic echo cancellation implementation
+    // In a real implementation we would use the webrtc-audio-processing library
+    // But for now we'll use a simpler approach that still works
+    fn apply_echo_cancellation(&self, input: Vec<f32>, far_end: &[f32]) -> Vec<f32> {
+        // Basic echo cancellation algorithm:
+        // 1. High-pass filter to reduce low-frequency echo
+        // 2. Adaptive noise cancellation based on far-end reference
 
         let mut output = input.clone();
 
-        // Basic highpass filter to reduce low-frequency echo components
-        let alpha = 0.8; // Filter coefficient
+        // High-pass filter (simple 1-pole filter)
+        let alpha = 0.95; // Filter coefficient
         let mut prev = 0.0;
 
         for i in 0..output.len() {
             output[i] = alpha * (output[i] - prev) + prev;
             prev = output[i];
+        }
+
+        // Simple echo cancellation using scaled subtraction
+        // This is a simplified version - real implementations are more complex
+        if !far_end.is_empty() {
+            let echo_coef = 0.3; // Echo reduction coefficient
+
+            // Use the minimum length of both buffers
+            let min_len = std::cmp::min(output.len(), far_end.len());
+
+            for i in 0..min_len {
+                // Simple echo reduction by subtracting scaled far-end signal
+                output[i] -= echo_coef * far_end[i];
+            }
         }
 
         output
