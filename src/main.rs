@@ -48,6 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a reference to app.session_manager that will be moved to the background task
     let session_manager_ref = app.session_manager.clone();
 
+    // Create a channel for audio visualization data
+    let (vis_tx, vis_rx) = mpsc::channel::<Vec<f32>>(100);
+    let vis_tx_clone = vis_tx.clone();
+
     // Create a separate reference to app that implements has_active_connection()
     let mut app_check_connection = App::new();
     app_check_connection.initialize().await?;
@@ -58,28 +62,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_check_connection = Arc::new(app_check_connection);
     let app_check_connection_clone = Arc::clone(&app_check_connection);
 
-    // Process audio in the background
-    let voice_processor = Arc::new(Mutex::new(
-        VoiceProcessor::new()
-            .with_vad_threshold(0.05)
-            .with_echo_cancellation(true),
-    ));
-    let spatial_processor = Arc::new(Mutex::new(SpatialAudioProcessor::new()));
-    let participants_clone = Arc::clone(&participants);
-
     // For throttling repeated error messages
     let mut last_error_time = std::time::Instant::now();
     let error_throttle_duration = std::time::Duration::from_secs(5);
+    let participants_clone = Arc::clone(&participants);
 
+    // Process audio in the background
     tokio::spawn(async move {
+        // Local instances for voice/audio processing
+        let voice_processor = Arc::new(Mutex::new(
+            VoiceProcessor::new()
+                .with_vad_threshold(0.05)
+                .with_echo_cancellation(true),
+        ));
+        let spatial_processor = Arc::new(Mutex::new(SpatialAudioProcessor::new()));
+
         while let Some(audio_data) = rx.recv().await {
-            // Voice processing
+            // Apply voice processing
             let processed = {
                 let voice_processor = voice_processor.lock().unwrap();
-                voice_processor.process(audio_data)
+                voice_processor.process(audio_data.clone())
             };
 
-            // Voice activity detection and update speaking status
+            // Forward the original audio data to the visualization channel
+            let _ = vis_tx_clone.send(audio_data.clone()).await;
+
+            // Check for voice activity
             let has_voice = {
                 let voice_processor = voice_processor.lock().unwrap();
                 voice_processor.detect_voice_activity(&processed)
@@ -131,8 +139,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a sharable app instance for the TUI
     let shared_app = Arc::new(Mutex::new(app));
 
-    // Run the TUI
-    if let Err(e) = run_tui(shared_app.clone()).await {
+    // Create and run the terminal UI
+    if let Err(e) = ui::terminal_ui::run_tui(shared_app.clone()).await {
         eprintln!("TUI error: {}", e);
     }
 

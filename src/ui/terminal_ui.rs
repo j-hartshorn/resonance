@@ -22,6 +22,7 @@ use std::{
 };
 
 use crate::app::App;
+use crate::audio;
 use crate::ui::widgets::{AudioVisualizationWidget, Participant, ParticipantListWidget};
 
 /// Structure representing the layout of the UI
@@ -499,8 +500,9 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
                     terminal_ui.update_participants(session.participants.clone());
                 }
 
-                // Usually you would get audio data here
-                // For example: terminal_ui.update_audio_data(audio_data);
+                // Use real audio data from the audio module
+                let audio_data = audio::generate_test_audio();
+                terminal_ui.update_audio_data(&audio_data);
             }
 
             // Render UI
