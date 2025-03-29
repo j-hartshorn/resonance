@@ -14,8 +14,10 @@ pub struct AudioVisualizationWidget {
     audio_data: Arc<Mutex<Vec<f32>>>,
     peak_levels: Arc<Mutex<Vec<f32>>>,
     spectrum_data: Arc<Mutex<Vec<f32>>>,
+    spectrum_history: Arc<Mutex<Vec<Vec<f32>>>>,
     max_samples: usize,
     num_bins: usize,
+    history_length: usize,
 }
 
 impl AudioVisualizationWidget {
@@ -24,8 +26,10 @@ impl AudioVisualizationWidget {
             audio_data: Arc::new(Mutex::new(Vec::new())),
             peak_levels: Arc::new(Mutex::new(Vec::new())),
             spectrum_data: Arc::new(Mutex::new(Vec::new())),
-            max_samples: 1024, // Increased for better FFT resolution
-            num_bins: 32,      // Number of frequency bins to display
+            spectrum_history: Arc::new(Mutex::new(Vec::new())),
+            max_samples: 2048, // Increased for better low-frequency resolution
+            num_bins: 24,      // Number of frequency bins to display
+            history_length: 3, // Number of frames to average
         }
     }
 
@@ -101,41 +105,115 @@ impl AudioVisualizationWidget {
             .map(|c| (c.norm_sqr()).sqrt())
             .collect();
 
-        // Scale magnitudes logarithmically (dB scale)
+        // Scale magnitudes logarithmically (dB scale) with improved dynamics
         for mag in &mut magnitudes {
             // Convert to dB scale (20 * log10(mag))
             // Adding a small value to avoid log(0)
             *mag = 20.0 * ((*mag + 1e-10).log10());
 
-            // Normalize to 0.0 - 1.0 range
-            *mag = (*mag + 100.0) / 100.0; // Typical dB range
-            *mag = mag.max(0.0).min(1.0); // Clamp to 0-1
+            // Apply a more dramatic curve to suppress small amplitudes
+            // and enhance medium-to-loud sounds (better for speech)
+            if *mag < -60.0 {
+                *mag = 0.0; // Noise gate - cut off very quiet sounds
+            } else {
+                // Normalize to 0.0 - 1.0 range with emphasis on speech levels
+                *mag = (*mag + 60.0) / 60.0; // Map -60dB..0dB to 0..1
+
+                // Apply non-linear curve to enhance mid-range values (speech volumes)
+                *mag = (*mag * *mag) * 1.3; // Square to enhance contrast
+                *mag = mag.max(0.0).min(1.0); // Clamp to 0-1
+            }
         }
 
         // Bin the magnitudes into frequency bands for visualization
+        // Use a logarithmic frequency scale to focus more on lower frequencies (where voice is)
+        let mut new_spectrum = Vec::with_capacity(self.num_bins);
+
+        // Frequency ranges oriented towards vocal content
+        // Speech is typically 85Hz-255Hz for fundamentals, with content up to ~8kHz
+        if !magnitudes.is_empty() {
+            let sample_rate = 44100.0; // Assuming 44.1kHz sample rate
+            let nyquist = sample_rate / 2.0;
+            let freq_per_bin = nyquist / magnitudes.len() as f32;
+
+            // Define vocal-focused frequency bands (in Hz)
+            let freq_bands = [
+                // Sub-bass and bass (male voice fundamentals)
+                80.0, 100.0, 125.0, 160.0, 200.0,
+                // Mid-range (female voice fundamentals)
+                250.0, 315.0, 400.0, 500.0, 630.0,
+                // Upper mid-range (important for speech clarity)
+                800.0, 1000.0, 1250.0, 1600.0, 2000.0, // Presence and brilliance
+                2500.0, 3150.0, 4000.0, 5000.0, 6300.0, // Upper frequencies
+                8000.0, 10000.0, 12500.0, 16000.0,
+            ];
+
+            // Calculate spectrum based on these bands
+            for (i, &freq) in freq_bands.iter().enumerate() {
+                if i == freq_bands.len() - 1 || i >= self.num_bins {
+                    break;
+                }
+
+                let start_bin = (freq / freq_per_bin) as usize;
+                let end_bin = (freq_bands[i + 1] / freq_per_bin) as usize;
+
+                let start = start_bin.min(magnitudes.len() - 1);
+                let end = end_bin.min(magnitudes.len());
+
+                if start < end {
+                    let avg_magnitude =
+                        magnitudes[start..end].iter().sum::<f32>() / (end - start) as f32;
+                    new_spectrum.push(avg_magnitude);
+                } else {
+                    new_spectrum.push(0.0);
+                }
+            }
+
+            // Ensure we have exactly num_bins
+            new_spectrum.resize(self.num_bins, 0.0);
+        } else {
+            // Fill with zeros if no data
+            new_spectrum.resize(self.num_bins, 0.0);
+        }
+
+        // Apply temporal smoothing using a moving average
+        let mut history = self.spectrum_history.lock().unwrap();
+
+        // Add new spectrum to history
+        history.push(new_spectrum);
+
+        // Keep only the latest history_length frames
+        while history.len() > self.history_length {
+            history.remove(0);
+        }
+
+        // Calculate the moving average
         let mut spectrum = self.spectrum_data.lock().unwrap();
         spectrum.clear();
 
-        // If we have enough data, create frequency bins
-        if !magnitudes.is_empty() {
-            let bin_size = magnitudes.len() / self.num_bins;
+        if !history.is_empty() {
+            spectrum.resize(self.num_bins, 0.0);
 
-            // Create bins by averaging magnitudes in each frequency range
-            for i in 0..self.num_bins {
-                let start = i * bin_size;
-                let end = (i + 1) * bin_size.min(magnitudes.len() - start);
+            // Calculate weighted moving average with more weight to recent frames
+            let mut total_weight = 0.0;
 
-                if start < magnitudes.len() && end > start {
-                    let avg_magnitude =
-                        magnitudes[start..end].iter().sum::<f32>() / (end - start) as f32;
-                    spectrum.push(avg_magnitude);
-                } else {
-                    spectrum.push(0.0);
+            for (i, frame) in history.iter().enumerate() {
+                let weight = (i + 1) as f32; // More recent frames get higher weight
+                total_weight += weight;
+
+                for (bin, &value) in frame.iter().enumerate() {
+                    if bin < spectrum.len() {
+                        spectrum[bin] += value * weight;
+                    }
                 }
             }
-        } else {
-            // Fill with zeros if no data
-            spectrum.resize(self.num_bins, 0.0);
+
+            // Normalize by total weight
+            if total_weight > 0.0 {
+                for bin in spectrum.iter_mut() {
+                    *bin /= total_weight;
+                }
+            }
         }
     }
 
@@ -156,13 +234,19 @@ impl AudioVisualizationWidget {
         self.num_bins = bins;
         self
     }
+
+    /// Set the length of the moving average history for smoothing
+    pub fn with_history_length(mut self, length: usize) -> Self {
+        self.history_length = length;
+        self
+    }
 }
 
 impl Widget for AudioVisualizationWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Draw a box around the widget
         Block::default()
-            .title("Frequency Spectrum")
+            .title("Vocal Frequency Spectrum")
             .borders(Borders::ALL)
             .render(area, buf);
 
@@ -189,7 +273,7 @@ impl Widget for AudioVisualizationWidget {
         let bar_width = bar_width.max(1); // Ensure minimum width of 1
 
         for (i, &magnitude) in spectrum_data.iter().enumerate() {
-            let bar_height = (magnitude * max_height as f32) as u16;
+            let bar_height = (magnitude * magnitude * max_height as f32) as u16; // Apply quadratic scaling
             let bar_height = bar_height.min(max_height);
 
             // Skip if no height
@@ -205,14 +289,17 @@ impl Widget for AudioVisualizationWidget {
                 let current_y = inner_area.y + inner_area.height - y - 1;
 
                 // Color gradient based on frequency and amplitude
-                let style = if i < spectrum_data.len() / 3 {
-                    // Low frequencies - green to yellow
+                let style = if i < spectrum_data.len() / 4 {
+                    // Low frequencies (male voice range) - deep blue to blue
+                    Style::default().fg(Color::Blue)
+                } else if i < spectrum_data.len() / 2 {
+                    // Low-mid frequencies (female voice range) - blue to green
                     Style::default().fg(Color::Green)
-                } else if i < 2 * spectrum_data.len() / 3 {
-                    // Mid frequencies - yellow to orange
+                } else if i < 3 * spectrum_data.len() / 4 {
+                    // Mid-high frequencies (consonants, clarity) - green to yellow
                     Style::default().fg(Color::Yellow)
                 } else {
-                    // High frequencies - orange to red
+                    // High frequencies - yellow to red
                     Style::default().fg(Color::Red)
                 };
 
