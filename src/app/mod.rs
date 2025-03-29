@@ -14,6 +14,7 @@ pub struct App {
     initialized: bool,
     config: Config,
     pub session_manager: Option<SessionManager>,
+    current_session: Option<Session>,
 }
 
 impl App {
@@ -23,6 +24,7 @@ impl App {
             initialized: true,
             config: Config::default(),
             session_manager: None,
+            current_session: None,
         }
     }
 
@@ -32,6 +34,7 @@ impl App {
             initialized: true,
             config,
             session_manager: None,
+            current_session: None,
         }
     }
 
@@ -121,8 +124,13 @@ impl App {
     }
 
     /// Gets the current session, if any
-    pub fn current_session(&self) -> Option<&Session> {
-        self.session_manager.as_ref()?.current_session()
+    pub fn current_session(&self) -> Option<Session> {
+        // Get a copy of the session instead of a reference
+        if let Some(sm) = self.session_manager.as_ref() {
+            sm.current_session()
+        } else {
+            self.current_session.clone()
+        }
     }
 
     /// Gets the current connection state, if any
@@ -134,13 +142,60 @@ impl App {
         }
     }
 
-    /// Checks if there's an active connection for sending audio data
+    /// Check if the app has an active connection
     pub async fn has_active_connection(&self) -> bool {
-        if let Some(sm) = self.session_manager.as_ref() {
-            sm.has_active_connection().await
-        } else {
-            false
+        if let Some(session_manager) = &self.session_manager {
+            return session_manager.has_active_connection().await;
         }
+        false
+    }
+
+    /// Arrange participants in a circle for spatial audio
+    pub fn arrange_participants_in_circle(&self) -> Vec<(String, (f32, f32, f32))> {
+        if let Some(session) = self.current_session() {
+            let participants = &session.participants;
+            let count = participants.len();
+
+            if count <= 1 {
+                return vec![(participants[0].name.clone(), (0.0, 0.0, 0.0))];
+            }
+
+            // Use SpatialAudioProcessor to arrange participants
+            let mut spatial_processor = crate::audio::SpatialAudioProcessor::new();
+
+            // Find our index in the participants list
+            let mut my_index = 0;
+            for (i, p) in participants.iter().enumerate() {
+                if p.name == "Me" {
+                    my_index = i;
+                    break;
+                }
+            }
+
+            // Arrange participants in a circle
+            let positions = spatial_processor.arrange_participants_in_circle(count, my_index);
+
+            // Map participant names to positions
+            participants
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.name.clone(), positions[i]))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Update participant positions based on spatial arrangement
+    pub async fn update_participant_positions(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(positions) = self.arrange_participants_in_circle().into_iter().next() {
+            if let Some(session_manager) = &mut self.session_manager {
+                // Update session manager with positions
+                // This would be implemented to update the peer positions
+                // in the actual implementation
+            }
+        }
+        Ok(())
     }
 
     /// Shuts down the application, releasing resources

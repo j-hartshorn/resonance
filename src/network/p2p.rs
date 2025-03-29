@@ -8,7 +8,7 @@ use tokio::net::UdpSocket;
 use uuid::Uuid;
 
 /// Public endpoint information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Endpoint {
     pub ip: IpAddr,
     pub port: u16,

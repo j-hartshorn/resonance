@@ -12,6 +12,7 @@ use super::p2p::{establish_direct_udp_connection, ConnectionState};
 use super::secure_channel::{Message, SecureChannel};
 
 /// Manages connections to remote peers
+#[derive(Clone)]
 pub struct ConnectionManager {
     /// Connection details for reconnection
     remote_ip: IpAddr,
@@ -363,6 +364,51 @@ impl ConnectionManager {
     pub async fn connection_state(&self) -> ConnectionState {
         let state = self.state.lock().await;
         state.clone()
+    }
+
+    /// Check if the connection is currently active
+    pub async fn is_connected(&self) -> bool {
+        let state = self.state.lock().await;
+        *state == ConnectionState::Connected
+    }
+
+    /// Send a message notifying that a peer has left the session
+    pub async fn send_peer_left(&self, peer_id: &str) -> Result<()> {
+        let message = Message::PeerLeft {
+            peer_id: peer_id.to_string(),
+        };
+        self.send_reliable(message).await
+    }
+
+    /// Send a list of peers to a newly connected peer
+    pub async fn send_peer_list(&self, peers: &[crate::app::session::Peer]) -> Result<()> {
+        let message = Message::PeerList {
+            peers: peers.to_vec(),
+        };
+        self.send_reliable(message).await
+    }
+
+    /// Send notification about a new peer to existing peers
+    pub async fn send_new_peer(&self, peer: &crate::app::session::Peer) -> Result<()> {
+        let message = Message::NewPeer { peer: peer.clone() };
+        self.send_reliable(message).await
+    }
+
+    /// Sends audio data to the remote peer
+    pub async fn send_audio_data(&self, audio_data: &[f32]) -> Result<()> {
+        // Convert f32 samples to bytes for transmission (simple conversion for testing)
+        let bytes: Vec<u8> = audio_data
+            .iter()
+            .map(|&sample| (sample * 255.0) as u8)
+            .collect();
+
+        // Generate timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        self.send_audio(&bytes, timestamp).await
     }
 }
 

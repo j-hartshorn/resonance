@@ -20,6 +20,54 @@ impl SpatialAudioProcessor {
         }
     }
 
+    /// Arrange participants in a virtual circle
+    ///
+    /// Returns a vector of (x, y, z) positions for each participant,
+    /// and sets the current user's listener position and orientation.
+    ///
+    /// # Arguments
+    /// * `participant_count` - Total number of participants
+    /// * `current_user_index` - Index of the current user in the circle (0-based)
+    pub fn arrange_participants_in_circle(
+        &mut self,
+        participant_count: usize,
+        current_user_index: usize,
+    ) -> Vec<(f32, f32, f32)> {
+        // Use a reasonable default radius for the circle (in meters)
+        let radius = 2.0;
+
+        // Create positions for all participants
+        let mut positions = Vec::with_capacity(participant_count);
+
+        for i in 0..participant_count {
+            // Calculate angle in radians for this participant
+            let angle = 2.0 * std::f32::consts::PI * (i as f32) / (participant_count as f32);
+
+            // Calculate position on the circle (y is up, so we use x and z for the circle)
+            let x = radius * angle.cos();
+            let z = radius * angle.sin();
+
+            positions.push((x, 0.0, z));
+        }
+
+        // Update listener position and orientation for the current user
+        if participant_count > 0 && current_user_index < participant_count {
+            // Set listener position to the current user's position in the circle
+            self.listener_position = positions[current_user_index];
+
+            // Calculate the angle to face the center of the circle
+            // This is the opposite of the position angle
+            let angle = 2.0 * std::f32::consts::PI * (current_user_index as f32)
+                / (participant_count as f32);
+
+            // Set orientation to face the center (negative to face inward)
+            // Only setting yaw (rotation around y-axis), keeping pitch and roll at 0
+            self.listener_orientation = (-angle, 0.0, 0.0);
+        }
+
+        positions
+    }
+
     pub fn set_source_position(&mut self, x: f32, y: f32, z: f32) {
         self.source_position = (x, y, z);
     }
@@ -133,5 +181,87 @@ mod tests {
 
         assert!(right_level_when_right > left_level_when_right);
         assert!(left_level_when_left > right_level_when_left);
+    }
+
+    #[test]
+    fn test_circular_positioning() {
+        let mut processor = SpatialAudioProcessor::new();
+
+        // Test with 4 participants
+        let positions = processor.arrange_participants_in_circle(4, 0);
+
+        // Verify we have 4 positions
+        assert_eq!(positions.len(), 4);
+
+        // Verify positions form a circle
+        // For each position, check distance from center is roughly the same
+        let radius = 2.0; // Expected radius
+        for (x, _, z) in &positions {
+            let distance = (x * x + z * z).sqrt();
+            assert!((distance - radius).abs() < 0.001); // Allow small floating-point error
+        }
+
+        // Check listener position is set to the current user's position
+        assert_eq!(processor.listener_position, positions[0]);
+    }
+
+    #[test]
+    fn test_consistent_relative_positioning() {
+        let mut processor = SpatialAudioProcessor::new();
+
+        // Arrange 3 participants in a circle
+        let positions = processor.arrange_participants_in_circle(3, 0);
+
+        // For 3 participants in a circle at radius 2.0:
+        // User 0: (2.0, 0.0, 0.0) - at 0 degrees
+        // User 1: (-1.0, 0.0, 1.732) - at 120 degrees
+        // User 2: (-1.0, 0.0, -1.732) - at 240 degrees
+
+        // Get positions after arrangement from user 0's perspective
+        let pos_0 = processor.listener_position;
+
+        // Calculate vectors from user 0 to other users
+        let vec_0_to_1 = (
+            positions[1].0 - pos_0.0,
+            positions[1].1 - pos_0.1,
+            positions[1].2 - pos_0.2,
+        );
+
+        let vec_0_to_2 = (
+            positions[2].0 - pos_0.0,
+            positions[2].1 - pos_0.1,
+            positions[2].2 - pos_0.2,
+        );
+
+        // Now arrange from user 1's perspective
+        let positions_from_1 = processor.arrange_participants_in_circle(3, 1);
+        let pos_1 = processor.listener_position;
+
+        // Calculate vector from user 1 to user 0
+        let vec_1_to_0 = (
+            positions_from_1[0].0 - pos_1.0,
+            positions_from_1[0].1 - pos_1.1,
+            positions_from_1[0].2 - pos_1.2,
+        );
+
+        // Verify consistency in spatial relationship:
+        // If user 1 is to the left of user 0, then user 0 should be to the right of user 1
+        // In a circle, the vectors should be approximately opposite
+
+        // Sum of the vectors should be close to zero for opposite directions
+        let sum_x = vec_0_to_1.0 + vec_1_to_0.0;
+        let sum_z = vec_0_to_1.2 + vec_1_to_0.2;
+
+        // Allow some floating point error
+        assert!(sum_x.abs() < 0.001, "X vector inconsistency: {}", sum_x);
+        assert!(sum_z.abs() < 0.001, "Z vector inconsistency: {}", sum_z);
+
+        // Verify that the dot product of the vectors is negative (pointing in opposite directions)
+        let dot_product = vec_0_to_1.0 * vec_1_to_0.0 + vec_0_to_1.2 * vec_1_to_0.2;
+        assert!(
+            dot_product < 0.0,
+            "Vectors should point in opposite directions, dot product: {}",
+            dot_product
+        );
     }
 }

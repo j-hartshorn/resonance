@@ -6,6 +6,7 @@ use super::capture::{
 pub struct VoiceProcessor {
     vad_threshold: f32,
     echo_cancellation_enabled: bool,
+    muted: bool,
 }
 
 impl VoiceProcessor {
@@ -13,6 +14,7 @@ impl VoiceProcessor {
         Self {
             vad_threshold: 0.1, // Arbitrary threshold for voice activity detection
             echo_cancellation_enabled: true,
+            muted: false,
         }
     }
 
@@ -26,7 +28,30 @@ impl VoiceProcessor {
         self
     }
 
+    pub fn with_muted(mut self, muted: bool) -> Self {
+        self.muted = muted;
+        self
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted
+    }
+
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+    }
+
+    pub fn toggle_mute(&mut self) -> bool {
+        self.muted = !self.muted;
+        self.muted
+    }
+
     pub fn process(&self, input: Vec<f32>) -> Vec<f32> {
+        // If muted, return silence
+        if self.muted {
+            return vec![0.0; input.len()];
+        }
+
         // In a real implementation, this would use webrtc-audio-processing
         // or another library for actual voice processing
 
@@ -90,5 +115,47 @@ mod tests {
 
         let speech = generate_test_speech();
         assert!(processor.detect_voice_activity(&speech));
+    }
+
+    #[test]
+    fn test_mute_functionality() {
+        // Test initial state
+        let processor = VoiceProcessor::new();
+        assert!(!processor.is_muted());
+
+        // Test with_muted builder
+        let muted_processor = VoiceProcessor::new().with_muted(true);
+        assert!(muted_processor.is_muted());
+
+        // Test set_muted
+        let mut processor = VoiceProcessor::new();
+        processor.set_muted(true);
+        assert!(processor.is_muted());
+
+        // Test toggle_mute
+        let mut processor = VoiceProcessor::new();
+        assert!(!processor.is_muted());
+        let new_state = processor.toggle_mute();
+        assert!(new_state);
+        assert!(processor.is_muted());
+        let new_state = processor.toggle_mute();
+        assert!(!new_state);
+        assert!(!processor.is_muted());
+    }
+
+    #[test]
+    fn test_mute_processing() {
+        let speech = generate_test_speech();
+
+        // Test unmuted - should return processed audio
+        let processor = VoiceProcessor::new();
+        let processed = processor.process(speech.clone());
+        assert!(!processed.iter().all(|&sample| sample == 0.0));
+
+        // Test muted - should return silence
+        let processor = VoiceProcessor::new().with_muted(true);
+        let processed = processor.process(speech.clone());
+        assert!(processed.iter().all(|&sample| sample == 0.0));
+        assert_eq!(processed.len(), speech.len());
     }
 }

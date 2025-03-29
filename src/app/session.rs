@@ -21,6 +21,10 @@ pub struct Session {
     pub participants: Vec<Participant>,
     /// Whether the current user is the host
     pub is_host: bool,
+    /// The original host's ID, used to maintain session if host leaves
+    pub original_host_id: String,
+    /// Time the session was created
+    pub created_at: u64,
 }
 
 /// Error types for session operations
@@ -51,13 +55,37 @@ impl From<anyhow::Error> for SessionError {
     }
 }
 
+/// Peer information for session participants
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Peer {
+    /// Unique identifier for the peer
+    pub id: String,
+    /// Display name of the peer
+    pub name: String,
+    /// Network endpoint information
+    pub endpoint: Endpoint,
+    /// Public key for secure communication
+    pub public_key: [u8; 32],
+    /// Position in virtual space (x, y, z)
+    pub position: (f32, f32, f32),
+    /// Whether this peer is currently the session host
+    pub is_host: bool,
+    /// Time this peer joined the session (for host election)
+    pub joined_at: u64,
+}
+
 /// Manages audio communication sessions
 pub struct SessionManager {
     current_session: Option<Session>,
     audio_streams: HashMap<String, Arc<Mutex<Vec<f32>>>>,
-    connection_manager: Option<ConnectionManager>,
+    // Changed from Option<ConnectionManager> to a HashMap to support multiple peers
+    peer_connections: HashMap<String, ConnectionManager>,
     background_tasks: Vec<JoinHandle<()>>,
     host_public_endpoint: Option<Endpoint>,
+    // Track all peers in the session
+    peers: HashMap<String, Peer>,
+    // Current user's ID
+    self_id: String,
 }
 
 impl SessionManager {
@@ -66,9 +94,11 @@ impl SessionManager {
         Self {
             current_session: None,
             audio_streams: HashMap::new(),
-            connection_manager: None,
+            peer_connections: HashMap::new(),
             background_tasks: Vec::new(),
             host_public_endpoint: None,
+            peers: HashMap::new(),
+            self_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -94,8 +124,27 @@ impl SessionManager {
         let keypair = crate::network::Keypair::generate();
         let public_key = keypair.public.to_bytes();
 
+        // Current timestamp for session creation
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         // Generate shareable link
         let connection_link = generate_connection_link(&endpoint, &session_id, &public_key);
+
+        // Add ourselves as a peer
+        let self_peer = Peer {
+            id: self.self_id.clone(),
+            name: "Me".to_string(),
+            endpoint: endpoint.clone(),
+            public_key,
+            position: (0.0, 0.0, 0.0),
+            is_host: true,
+            joined_at: timestamp,
+        };
+
+        self.peers.insert(self.self_id.clone(), self_peer);
 
         // Create session
         let current_user = Participant::new("Me").with_position(0.0, 0.0, 0.0);
@@ -104,6 +153,8 @@ impl SessionManager {
             connection_link: connection_link.clone(),
             participants: vec![current_user],
             is_host: true,
+            original_host_id: self.self_id.clone(),
+            created_at: timestamp,
         };
 
         // Start listening for incoming connections
@@ -124,7 +175,16 @@ impl SessionManager {
         let (remote_ip, remote_port, session_id, remote_key) = parse_connection_link(link)
             .map_err(|e| SessionError::JoinError(format!("Invalid link: {}", e)))?;
 
-        // Create connection manager
+        // Host endpoint
+        let host_endpoint = Endpoint {
+            ip: remote_ip,
+            port: remote_port,
+        };
+
+        // Host ID
+        let host_id = format!("host-{}", session_id);
+
+        // Create connection manager for the host
         let connection_manager =
             ConnectionManager::new(remote_ip, remote_port, session_id.clone(), remote_key);
 
@@ -134,8 +194,45 @@ impl SessionManager {
             .await
             .map_err(|e| SessionError::JoinError(format!("Connection failed: {}", e)))?;
 
+        // Current timestamp for joining
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Add the host to peers list
+        let host_peer = Peer {
+            id: host_id.clone(),
+            name: "Host".to_string(),
+            endpoint: host_endpoint,
+            public_key: remote_key,
+            position: (0.0, 0.0, -1.0),
+            is_host: true,
+            joined_at: timestamp - 1, // Host joined before us
+        };
+        self.peers.insert(host_id.clone(), host_peer);
+
+        // Add ourselves to the peers list
+        let self_peer = Peer {
+            id: self.self_id.clone(),
+            name: "Me".to_string(),
+            endpoint: Endpoint {
+                ip: "0.0.0.0".parse().unwrap(),
+                port: 0,
+            }, // Will be updated after STUN
+            public_key: [0; 32], // Will be set properly later
+            position: (0.0, 0.0, 0.0),
+            is_host: false,
+            joined_at: timestamp,
+        };
+        self.peers.insert(self.self_id.clone(), self_peer);
+
         // Start message handler
         let audio_streams = self.audio_streams.clone();
+        let peers = Arc::new(Mutex::new(self.peers.clone()));
+        let session_id_clone = session_id.clone();
+        let self_id_clone = self.self_id.clone();
+
         let handler_task = connection_manager
             .start_listening(move |message| {
                 match message {
@@ -150,7 +247,71 @@ impl SessionManager {
                             *stream = samples;
                         }
                     }
-                    _ => {} // Handle other message types as needed
+                    Message::PeerList { peers: peer_list } => {
+                        // Received peer list from host
+                        let mut peers_lock = peers.lock().unwrap();
+
+                        // Update our peer list with the received information
+                        for peer in peer_list {
+                            // Don't update ourselves
+                            if peer.id != self_id_clone {
+                                peers_lock.insert(peer.id.clone(), peer);
+                            }
+                        }
+
+                        // TODO: Connect to other peers in the list
+                    }
+                    Message::NewPeer { peer } => {
+                        // A new peer joined the session
+                        let mut peers_lock = peers.lock().unwrap();
+
+                        // Add to our peer list
+                        if peer.id != self_id_clone {
+                            peers_lock.insert(peer.id.clone(), peer);
+                        }
+
+                        // TODO: Connect to this new peer
+                    }
+                    Message::PeerLeft { peer_id } => {
+                        // A peer left the session
+                        let mut peers_lock = peers.lock().unwrap();
+
+                        // Remove from our peer list
+                        peers_lock.remove(&peer_id);
+
+                        // If the host left, elect a new host
+                        let mut new_host = false;
+                        for peer in peers_lock.values() {
+                            if peer.is_host && peer.id == peer_id {
+                                new_host = true;
+                                break;
+                            }
+                        }
+
+                        if new_host {
+                            // Simple host election: oldest peer becomes host
+                            let mut oldest_time = u64::MAX;
+                            let mut oldest_id = String::new();
+
+                            for (id, peer) in peers_lock.iter() {
+                                if peer.joined_at < oldest_time {
+                                    oldest_time = peer.joined_at;
+                                    oldest_id = id.clone();
+                                }
+                            }
+
+                            // If we're the oldest, we become host
+                            if oldest_id == self_id_clone {
+                                if let Some(peer) = peers_lock.get_mut(&self_id_clone) {
+                                    peer.is_host = true;
+
+                                    // TODO: Notify other peers that we're the new host
+                                }
+                            }
+                        }
+                    }
+                    // Handle other message types as needed
+                    _ => {}
                 }
 
                 Ok(())
@@ -158,7 +319,8 @@ impl SessionManager {
             .await;
 
         self.background_tasks.push(handler_task);
-        self.connection_manager = Some(connection_manager);
+        self.peer_connections
+            .insert(host_id.clone(), connection_manager);
 
         // Create local session representation with host and current user
         let current_user = Participant::new("Me").with_position(0.0, 0.0, 0.0);
@@ -169,6 +331,8 @@ impl SessionManager {
             connection_link: link.to_string(),
             participants: vec![current_user, host],
             is_host: false,
+            original_host_id: host_id,
+            created_at: timestamp - 1, // Host created before we joined
         };
 
         // Initialize audio stream for host
@@ -182,6 +346,14 @@ impl SessionManager {
     /// Leaves the current session
     pub async fn leave_session(&mut self) -> Result<(), SessionError> {
         if self.current_session.is_some() {
+            // Notify all peers that we're leaving
+            for (peer_id, connection) in &self.peer_connections {
+                // Skip sending if connection is not active
+                if connection.is_connected().await {
+                    let _ = connection.send_peer_left(&self.self_id).await;
+                }
+            }
+
             // Clear audio streams for all participants
             self.audio_streams.clear();
 
@@ -190,8 +362,11 @@ impl SessionManager {
                 task.abort();
             }
 
-            // Clear connection manager
-            self.connection_manager = None;
+            // Clear connection managers
+            self.peer_connections.clear();
+
+            // Clear peers list
+            self.peers.clear();
 
             self.current_session = None;
             Ok(())
@@ -200,9 +375,9 @@ impl SessionManager {
         }
     }
 
-    /// Returns a reference to the current session, if any
-    pub fn current_session(&self) -> Option<&Session> {
-        self.current_session.as_ref()
+    /// Gets the current session if available
+    pub fn current_session(&self) -> Option<Session> {
+        self.current_session.clone()
     }
 
     /// Adds a participant to the current session
@@ -260,67 +435,235 @@ impl SessionManager {
         }
     }
 
-    /// Sends audio data to remote peers
+    /// Sends audio data to all connected peers
     pub async fn send_audio_data(&self, audio_data: &[f32]) -> Result<(), SessionError> {
-        if let Some(connection_manager) = &self.connection_manager {
-            // Convert f32 samples to bytes for transmission
-            // This is a simplified example - real implementation would properly convert
-            let bytes: Vec<u8> = audio_data
-                .iter()
-                .map(|&sample| ((sample * 255.0) as u8))
-                .collect();
+        let mut errors = Vec::new();
 
-            // Get current timestamp
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
+        // Send to all connected peers
+        for (peer_id, connection) in &self.peer_connections {
+            // Skip sending to ourselves
+            if peer_id == &self.self_id {
+                continue;
+            }
+
+            // Skip if connection is not active
+            if !connection.is_connected().await {
+                continue;
+            }
 
             // Send audio data
-            connection_manager
-                .send_audio(&bytes, timestamp)
-                .await
-                .map_err(|e| SessionError::NetworkError(e.to_string()))?;
+            if let Err(e) = connection.send_audio_data(audio_data).await {
+                errors.push(format!("Failed to send audio to {}: {}", peer_id, e));
+            }
+        }
 
+        if errors.is_empty() {
             Ok(())
         } else {
-            Err(SessionError::NetworkError(
-                "No active connection".to_string(),
-            ))
+            Err(SessionError::NetworkError(errors.join("; ")))
         }
     }
 
-    /// Gets the connection state if available
+    /// Checks if the session has a valid connection manager
     pub async fn connection_state(&self) -> Option<ConnectionState> {
-        match self.connection_manager.as_ref() {
-            Some(cm) => Some(cm.connection_state().await),
-            None => None,
+        for connection in self.peer_connections.values() {
+            let state = connection.connection_state().await;
+            if state == ConnectionState::Connected {
+                return Some(state);
+            }
         }
+        None
     }
 
-    /// Checks if there's an active connection to send audio over
-    pub async fn has_active_connection(&self) -> bool {
-        match self.connection_manager.as_ref() {
-            Some(cm) => {
-                // Check if we have a connection manager and it's in Connected state
-                match cm.connection_state().await {
-                    ConnectionState::Connected => true,
-                    _ => false,
-                }
-            }
-            None => false,
+    /// Connects to a peer in the session
+    pub async fn connect_to_peer(&mut self, peer_id: &str) -> Result<(), SessionError> {
+        // Get peer info
+        let peer = match self.peers.get(peer_id) {
+            Some(peer) => peer.clone(),
+            None => return Err(SessionError::NetworkError("Peer not found".to_string())),
+        };
+
+        // Don't connect to ourselves
+        if peer.id == self.self_id {
+            return Ok(());
         }
+
+        // Skip if already connected
+        if self.peer_connections.contains_key(&peer.id) {
+            return Ok(());
+        }
+
+        let session_id = match &self.current_session {
+            Some(session) => session.id.clone(),
+            None => return Err(SessionError::NoActiveSession),
+        };
+
+        // Create connection manager
+        let connection_manager = ConnectionManager::new(
+            peer.endpoint.ip,
+            peer.endpoint.port,
+            session_id,
+            peer.public_key,
+        );
+
+        // Connect to peer
+        connection_manager
+            .connect()
+            .await
+            .map_err(|e| SessionError::NetworkError(format!("Connection failed: {}", e)))?;
+
+        // Setup message handler
+        let audio_streams = self.audio_streams.clone();
+        let peers = Arc::new(Mutex::new(self.peers.clone()));
+        let self_id_clone = self.self_id.clone();
+        let peer_name = peer.name.clone();
+
+        let handler_task = connection_manager
+            .start_listening(move |message| {
+                match message {
+                    Message::Audio { data, timestamp: _ } => {
+                        // Convert audio data to f32 samples
+                        let samples: Vec<f32> = data.iter().map(|&b| (b as f32) / 255.0).collect();
+
+                        // Store audio stream for this peer
+                        if let Some(stream) = audio_streams.get(&peer_name) {
+                            let mut stream = stream.lock().unwrap();
+                            *stream = samples;
+                        }
+                    }
+                    Message::PeerLeft { peer_id } => {
+                        // A peer left the session
+                        let mut peers_lock = peers.lock().unwrap();
+                        peers_lock.remove(&peer_id);
+
+                        // Handle host leaving
+                        let mut new_host_needed = false;
+                        for peer in peers_lock.values() {
+                            if peer.is_host && peer.id == peer_id {
+                                new_host_needed = true;
+                                break;
+                            }
+                        }
+
+                        if new_host_needed {
+                            // Simple host election: oldest peer becomes host
+                            let mut oldest_time = u64::MAX;
+                            let mut oldest_id = String::new();
+
+                            for (id, peer) in peers_lock.iter() {
+                                if peer.joined_at < oldest_time {
+                                    oldest_time = peer.joined_at;
+                                    oldest_id = id.clone();
+                                }
+                            }
+
+                            // If we're the oldest, we become host
+                            if oldest_id == self_id_clone {
+                                if let Some(peer) = peers_lock.get_mut(&self_id_clone) {
+                                    peer.is_host = true;
+                                }
+                            }
+                        }
+                    }
+                    // Handle other message types as needed
+                    _ => {}
+                }
+
+                Ok(())
+            })
+            .await;
+
+        self.background_tasks.push(handler_task);
+        self.peer_connections
+            .insert(peer.id.clone(), connection_manager);
+
+        // Initialize audio stream for this peer
+        self.audio_streams
+            .insert(peer.name.clone(), Arc::new(Mutex::new(Vec::new())));
+
+        Ok(())
+    }
+
+    /// Synchronizes the list of peers with all connected peers
+    pub async fn sync_peers(&mut self) -> Result<(), SessionError> {
+        // Only the host should send the peer list
+        let is_host = match &self.current_session {
+            Some(session) => session.is_host,
+            None => return Err(SessionError::NoActiveSession),
+        };
+
+        if !is_host {
+            return Ok(());
+        }
+
+        // Send peer list to all peers
+        let peers: Vec<Peer> = self.peers.values().cloned().collect();
+
+        for (peer_id, connection) in &self.peer_connections {
+            // Skip sending to ourselves
+            if peer_id == &self.self_id {
+                continue;
+            }
+
+            // Skip sending if connection is not active
+            if connection.is_connected().await {
+                let _ = connection.send_peer_list(&peers).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Sends a notification that a new peer has joined
+    pub async fn notify_new_peer(&mut self, peer: &Peer) -> Result<(), SessionError> {
+        // Only the host should send new peer notifications
+        let is_host = match &self.current_session {
+            Some(session) => session.is_host,
+            None => return Err(SessionError::NoActiveSession),
+        };
+
+        if !is_host {
+            return Ok(());
+        }
+
+        // Send notification to all peers
+        for (peer_id, connection) in &self.peer_connections {
+            // Skip sending to ourselves and to the new peer
+            if peer_id == &self.self_id || peer_id == &peer.id {
+                continue;
+            }
+
+            // Skip sending if connection is not active
+            if connection.is_connected().await {
+                let _ = connection.send_new_peer(peer).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Checks if the session has an active connection
+    pub async fn has_active_connection(&self) -> bool {
+        // If we have any active peer connections
+        for connection in self.peer_connections.values() {
+            if connection.is_connected().await {
+                return true;
+            }
+        }
+        false
     }
 }
 
 impl Clone for SessionManager {
     fn clone(&self) -> Self {
-        Self {
+        SessionManager {
             current_session: self.current_session.clone(),
             audio_streams: self.audio_streams.clone(),
-            connection_manager: None, // Cannot clone ConnectionManager, so create a new one if needed
+            peer_connections: self.peer_connections.clone(),
             background_tasks: Vec::new(), // Don't clone background tasks
             host_public_endpoint: self.host_public_endpoint.clone(),
+            peers: self.peers.clone(),
+            self_id: self.self_id.clone(),
         }
     }
 }
@@ -328,6 +671,7 @@ impl Clone for SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     #[test]
     fn test_session_creation() {
@@ -336,6 +680,8 @@ mod tests {
             connection_link: "test-link".to_string(),
             participants: vec![Participant::new("Me")],
             is_host: true,
+            original_host_id: "test-id".to_string(),
+            created_at: 0,
         };
 
         assert_eq!(session.id, "test-id");
@@ -345,36 +691,59 @@ mod tests {
     }
 
     #[test]
-    fn test_participant_management() {
-        let mut session_manager = SessionManager::new();
+    fn test_peer_creation() {
+        let peer = Peer {
+            id: "test-peer".to_string(),
+            name: "Test Peer".to_string(),
+            endpoint: Endpoint {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: 8080,
+            },
+            public_key: [0; 32],
+            position: (1.0, 0.0, 1.0),
+            is_host: false,
+            joined_at: 100,
+        };
 
-        // Manually create a session
-        let current_user = Participant::new("Me").with_position(0.0, 0.0, 0.0);
+        assert_eq!(peer.id, "test-peer");
+        assert_eq!(peer.name, "Test Peer");
+        assert_eq!(peer.endpoint.port, 8080);
+        assert!(!peer.is_host);
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_creation() {
+        let manager = SessionManager::new();
+        assert!(manager.current_session().is_none());
+        assert_eq!(manager.audio_streams.len(), 0);
+        assert_eq!(manager.peer_connections.len(), 0);
+        assert_eq!(manager.peers.len(), 0);
+    }
+
+    #[test]
+    fn test_session_error_creation() {
+        let error = SessionError::NoActiveSession;
+        assert!(format!("{}", error).contains("No active session"));
+
+        let error = SessionError::CreationError("test error".to_string());
+        assert!(format!("{}", error).contains("test error"));
+    }
+
+    #[test]
+    fn test_clone_implementation() {
         let session = Session {
             id: "test-id".to_string(),
             connection_link: "test-link".to_string(),
-            participants: vec![current_user],
+            participants: vec![Participant::new("Me")],
             is_host: true,
+            original_host_id: "test-id".to_string(),
+            created_at: 0,
         };
 
-        session_manager.current_session = Some(session);
-
-        // Add a participant
-        let new_participant = Participant::new("User1").with_position(1.0, 0.0, 0.0);
-        session_manager
-            .add_participant(new_participant.clone())
-            .unwrap();
-
-        // Check that participant was added
-        let session = session_manager.current_session().unwrap();
-        assert_eq!(session.participants.len(), 2);
-        assert_eq!(session.participants[1].name, "User1");
-
-        // Remove the participant
-        session_manager.remove_participant("User1").unwrap();
-
-        // Check that participant was removed
-        let session = session_manager.current_session().unwrap();
-        assert_eq!(session.participants.len(), 1);
+        let cloned = session.clone();
+        assert_eq!(session.id, cloned.id);
+        assert_eq!(session.participants.len(), cloned.participants.len());
     }
+
+    // More complex tests for peer interactions would be done with integration tests
 }

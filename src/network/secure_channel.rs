@@ -53,6 +53,14 @@ pub enum Message {
     Heartbeat,
     /// Error message
     Error { code: u32, message: String },
+    /// List of peers in a session (from host to peers)
+    PeerList {
+        peers: Vec<crate::app::session::Peer>,
+    },
+    /// New peer joined the session (from host to peers)
+    NewPeer { peer: crate::app::session::Peer },
+    /// Peer left the session (from peer to all)
+    PeerLeft { peer_id: String },
 }
 
 /// Rate limiting configuration
