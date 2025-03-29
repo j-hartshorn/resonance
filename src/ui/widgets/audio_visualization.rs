@@ -27,7 +27,7 @@ impl AudioVisualizationWidget {
             peak_levels: Arc::new(Mutex::new(Vec::new())),
             spectrum_data: Arc::new(Mutex::new(Vec::new())),
             spectrum_history: Arc::new(Mutex::new(Vec::new())),
-            max_samples: 0248, // Increased for better low-frequency resolution
+            max_samples: 2048, // Increased for better low-frequency resolution
             num_bins: 64,      // Adjusted number for better display with terminal widths
             history_length: 8, // Increased frames to average for smoother display
         }
