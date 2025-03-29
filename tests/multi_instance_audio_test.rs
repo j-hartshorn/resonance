@@ -1,5 +1,5 @@
 use resonance::app::session::{Peer, Session, SessionManager};
-use resonance::audio::{AudioCapture, AudioDeviceManager};
+use resonance::audio::AudioCapture;
 use resonance::network::p2p::Endpoint;
 use resonance::ui::Participant;
 use std::sync::{Arc, Mutex};
