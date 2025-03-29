@@ -44,6 +44,7 @@ pub struct MenuItem {
 /// Represents possible menu actions
 #[derive(Debug, Clone)]
 pub enum MenuAction {
+    Create,
     Join,
     Leave,
     CopyLink,
@@ -73,32 +74,15 @@ pub struct TerminalUI {
 
 impl TerminalUI {
     pub fn new() -> Self {
-        // Create default menu items
-        let menu_items = vec![
-            MenuItem {
-                label: "Join Session".to_string(),
-                action: MenuAction::Join,
-            },
-            MenuItem {
-                label: "Leave Session".to_string(),
-                action: MenuAction::Leave,
-            },
-            MenuItem {
-                label: "Copy Link".to_string(),
-                action: MenuAction::CopyLink,
-            },
-            MenuItem {
-                label: "Quit".to_string(),
-                action: MenuAction::Quit,
-            },
-        ];
+        // Initialize clipboard
+        let clipboard = ClipboardProvider::new().ok();
 
         // Initialize with empty menu selection
         let mut menu_state = ListState::default();
         menu_state.select(Some(0)); // Select the first item by default
 
-        // Initialize clipboard
-        let clipboard = ClipboardProvider::new().ok();
+        // Menu items will be set during render based on connection state
+        let menu_items = Vec::new();
 
         Self {
             terminal: None,
@@ -213,7 +197,7 @@ impl TerminalUI {
     }
 
     /// Show a notification message
-    fn show_notification(&mut self, message: String, duration: Duration) {
+    pub fn show_notification(&mut self, message: String, duration: Duration) {
         self.notification = Some(Notification {
             message,
             start_time: Instant::now(),
@@ -421,6 +405,53 @@ impl TerminalUI {
         }
         Ok(())
     }
+
+    /// Updates the menu items based on whether there's an active connection
+    pub fn update_menu_items(&mut self, has_active_connection: bool) {
+        if has_active_connection {
+            // In a session menu options
+            self.menu_items = vec![
+                MenuItem {
+                    label: "Leave Session".to_string(),
+                    action: MenuAction::Leave,
+                },
+                MenuItem {
+                    label: "Copy Link".to_string(),
+                    action: MenuAction::CopyLink,
+                },
+                MenuItem {
+                    label: "Quit".to_string(),
+                    action: MenuAction::Quit,
+                },
+            ];
+        } else {
+            // Not in a session menu options
+            self.menu_items = vec![
+                MenuItem {
+                    label: "Create Session".to_string(),
+                    action: MenuAction::Create,
+                },
+                MenuItem {
+                    label: "Join Session".to_string(),
+                    action: MenuAction::Join,
+                },
+                MenuItem {
+                    label: "Quit".to_string(),
+                    action: MenuAction::Quit,
+                },
+            ];
+        }
+
+        // Ensure menu selection is still valid
+        let max_index = self.menu_items.len().saturating_sub(1);
+        if let Some(selected) = self.menu_state.selected() {
+            if selected > max_index {
+                self.menu_state.select(Some(max_index));
+            }
+        } else {
+            self.menu_state.select(Some(0));
+        }
+    }
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -460,15 +491,25 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
 
                         let mut app_lock = app.lock().unwrap();
                         match action {
-                            MenuAction::Join => {
-                                // Prompt user for join link or create new session
-                                // For this example, we'll just create a new session
+                            MenuAction::Create => {
+                                // Create a new session
                                 if let Ok(session) = app_lock.create_p2p_session().await {
                                     terminal_ui
                                         .set_connection_link(Some(session.connection_link.clone()));
-
-                                    // Update participants
                                     terminal_ui.update_participants(session.participants.clone());
+                                    // Update menu for active connection
+                                    terminal_ui.update_menu_items(true);
+                                }
+                            }
+                            MenuAction::Join => {
+                                // For this example, we'll just create a new session
+                                // In a real implementation, this would prompt for a link
+                                if let Ok(session) = app_lock.create_p2p_session().await {
+                                    terminal_ui
+                                        .set_connection_link(Some(session.connection_link.clone()));
+                                    terminal_ui.update_participants(session.participants.clone());
+                                    // Update menu for active connection
+                                    terminal_ui.update_menu_items(true);
                                 }
                             }
                             MenuAction::Leave => {
@@ -476,6 +517,8 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
                                     let _ = app_lock.leave_session().await;
                                     terminal_ui.set_connection_link(None);
                                     terminal_ui.update_participants(vec![]);
+                                    // Update menu for no active connection
+                                    terminal_ui.update_menu_items(false);
                                 }
                             }
                             MenuAction::CopyLink => {

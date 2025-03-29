@@ -368,7 +368,12 @@ impl SessionManager {
             // Clear peers list
             self.peers.clear();
 
+            // Clear current session
             self.current_session = None;
+
+            // Clear host endpoint
+            self.host_public_endpoint = None;
+
             Ok(())
         } else {
             Err(SessionError::NoActiveSession)
@@ -644,7 +649,17 @@ impl SessionManager {
 
     /// Checks if the session has an active connection
     pub async fn has_active_connection(&self) -> bool {
-        // If we have any active peer connections
+        // First check if we have a current session
+        if self.current_session.is_none() {
+            return false;
+        }
+
+        // If we have a session but no peer connections, return true if we're the host
+        if self.peer_connections.is_empty() {
+            return self.current_session.as_ref().map_or(false, |s| s.is_host);
+        }
+
+        // Otherwise check for active peer connections
         for connection in self.peer_connections.values() {
             if connection.is_connected().await {
                 return true;

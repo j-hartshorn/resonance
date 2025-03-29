@@ -182,6 +182,13 @@ async fn run_tui_with_audio(
     let mut terminal_ui = ui::terminal_ui::TerminalUI::new();
     terminal_ui.initialize()?;
 
+    // Check if we're already in a session and set menu items accordingly
+    let has_connection = {
+        let app_lock = app.lock().unwrap();
+        app_lock.has_active_connection().await
+    };
+    terminal_ui.update_menu_items(has_connection);
+
     // Main event loop
     let tick_rate = Duration::from_millis(33); // ~30 FPS
     let mut last_tick = std::time::Instant::now();
@@ -213,22 +220,65 @@ async fn run_tui_with_audio(
 
                         let mut app_lock = app.lock().unwrap();
                         match action {
-                            ui::MenuAction::Join => {
-                                // Prompt user for join link or create new session
-                                // For this example, we'll just create a new session
+                            ui::MenuAction::Create => {
+                                // Create a new session
                                 if let Ok(session) = app_lock.create_p2p_session().await {
                                     terminal_ui
                                         .set_connection_link(Some(session.connection_link.clone()));
-
-                                    // Update participants
                                     terminal_ui.update_participants(session.participants.clone());
+                                    // Update menu for active connection
+                                    terminal_ui.update_menu_items(true);
+                                }
+                            }
+                            ui::MenuAction::Join => {
+                                // For this example, we'll just create a new session
+                                // In a real implementation, this would prompt for a link
+                                if let Ok(session) = app_lock.create_p2p_session().await {
+                                    terminal_ui
+                                        .set_connection_link(Some(session.connection_link.clone()));
+                                    terminal_ui.update_participants(session.participants.clone());
+                                    // Update menu for active connection
+                                    terminal_ui.update_menu_items(true);
                                 }
                             }
                             ui::MenuAction::Leave => {
                                 if app_lock.has_active_connection().await {
-                                    let _ = app_lock.leave_session().await;
+                                    // Show a notification that we're leaving
+                                    terminal_ui.show_notification(
+                                        "Leaving session...".to_string(),
+                                        Duration::from_secs(1),
+                                    );
+
+                                    // Actually leave the session
+                                    match app_lock.leave_session().await {
+                                        Ok(_) => {
+                                            // Clear UI state
+                                            terminal_ui.set_connection_link(None);
+                                            terminal_ui.update_participants(vec![]);
+                                            // Update menu for no active connection
+                                            terminal_ui.update_menu_items(false);
+                                            terminal_ui.show_notification(
+                                                "Session left successfully".to_string(),
+                                                Duration::from_secs(2),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            terminal_ui.show_notification(
+                                                format!("Error leaving session: {}", e),
+                                                Duration::from_secs(3),
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    // Already not in a session
+                                    terminal_ui.show_notification(
+                                        "Not in a session".to_string(),
+                                        Duration::from_secs(2),
+                                    );
+                                    // Make sure UI is in the correct state
                                     terminal_ui.set_connection_link(None);
                                     terminal_ui.update_participants(vec![]);
+                                    terminal_ui.update_menu_items(false);
                                 }
                             }
                             ui::MenuAction::CopyLink => {
