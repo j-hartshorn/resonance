@@ -1,3 +1,4 @@
+use clipboard::{ClipboardContext, ClipboardProvider};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -21,16 +22,15 @@ use std::{
 };
 
 use crate::app::App;
-use crate::ui::qr_code::generate_qr_code;
 use crate::ui::widgets::{AudioVisualizationWidget, Participant, ParticipantListWidget};
 
-/// Structure representing the quadrant layout of the UI
+/// Structure representing the layout of the UI
 #[derive(Debug, Clone, Copy)]
-pub struct QuadrantLayout {
-    pub top_left: Rect,     // Menu options
-    pub top_right: Rect,    // User list
-    pub bottom_left: Rect,  // QR code and join link
-    pub bottom_right: Rect, // Audio visualization
+pub struct AppLayout {
+    pub menu_area: Rect,         // Top left - Menu options
+    pub participants_area: Rect, // Top right - User list
+    pub audio_area: Rect,        // Bottom - Audio visualization
+    pub status_bar: Rect,        // Bottom bar - Connection info and status
 }
 
 /// Represents a selectable menu item
@@ -45,7 +45,16 @@ pub struct MenuItem {
 pub enum MenuAction {
     Join,
     Leave,
+    CopyLink,
     Quit,
+}
+
+/// Represents UI notification state
+#[derive(Debug, Clone)]
+struct Notification {
+    message: String,
+    start_time: Instant,
+    duration: Duration,
 }
 
 /// Main UI controller that manages terminal rendering
@@ -57,6 +66,8 @@ pub struct TerminalUI {
     participants: Arc<Mutex<Vec<Participant>>>,
     audio_visualizer: AudioVisualizationWidget,
     connection_link: Arc<Mutex<Option<String>>>,
+    notification: Option<Notification>,
+    clipboard: Option<ClipboardContext>,
 }
 
 impl TerminalUI {
@@ -72,6 +83,10 @@ impl TerminalUI {
                 action: MenuAction::Leave,
             },
             MenuItem {
+                label: "Copy Link".to_string(),
+                action: MenuAction::CopyLink,
+            },
+            MenuItem {
                 label: "Quit".to_string(),
                 action: MenuAction::Quit,
             },
@@ -81,6 +96,9 @@ impl TerminalUI {
         let mut menu_state = ListState::default();
         menu_state.select(Some(0)); // Select the first item by default
 
+        // Initialize clipboard
+        let clipboard = ClipboardProvider::new().ok();
+
         Self {
             terminal: None,
             running: Arc::new(AtomicBool::new(false)),
@@ -89,6 +107,8 @@ impl TerminalUI {
             participants: Arc::new(Mutex::new(Vec::new())),
             audio_visualizer: AudioVisualizationWidget::new(),
             connection_link: Arc::new(Mutex::new(None)),
+            notification: None,
+            clipboard,
         }
     }
 
@@ -125,30 +145,37 @@ impl TerminalUI {
         Ok(())
     }
 
-    /// Creates a quadrant layout
-    pub fn create_layout(&self, area: Rect) -> QuadrantLayout {
-        // First split the screen into top and bottom
+    /// Creates the application layout
+    pub fn create_layout(&self, area: Rect) -> AppLayout {
+        // First split for top content and status bar
         let vertical_split = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([
+                Constraint::Min(5),    // Main content area
+                Constraint::Length(3), // Status bar at bottom
+            ])
             .split(area);
 
-        // Then split each half horizontally
-        let top_split = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        // Split top area into two vertical sections
+        let top_areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(45), // Top section (menu and participants)
+                Constraint::Percentage(55), // Bottom section (audio visualization)
+            ])
             .split(vertical_split[0]);
 
-        let bottom_split = Layout::default()
+        // Split the top section horizontally for menu and participants
+        let top_split = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(vertical_split[1]);
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(top_areas[0]);
 
-        QuadrantLayout {
-            top_left: top_split[0],
-            top_right: top_split[1],
-            bottom_left: bottom_split[0],
-            bottom_right: bottom_split[1],
+        AppLayout {
+            menu_area: top_split[0],
+            participants_area: top_split[1],
+            audio_area: top_areas[1],
+            status_bar: vertical_split[1],
         }
     }
 
@@ -167,6 +194,39 @@ impl TerminalUI {
     pub fn set_connection_link(&self, link: Option<String>) {
         let mut lock = self.connection_link.lock().unwrap();
         *lock = link;
+    }
+
+    /// Copy text to clipboard
+    fn copy_to_clipboard(&mut self, text: &str) -> bool {
+        if let Some(clipboard) = &mut self.clipboard {
+            if clipboard.set_contents(text.to_owned()).is_ok() {
+                self.show_notification(
+                    "Link copied to clipboard!".to_string(),
+                    Duration::from_secs(2),
+                );
+                return true;
+            }
+        }
+        self.show_notification("Failed to copy link!".to_string(), Duration::from_secs(2));
+        false
+    }
+
+    /// Show a notification message
+    fn show_notification(&mut self, message: String, duration: Duration) {
+        self.notification = Some(Notification {
+            message,
+            start_time: Instant::now(),
+            duration,
+        });
+    }
+
+    /// Update notification state (remove if expired)
+    fn update_notification(&mut self) {
+        if let Some(notification) = &self.notification {
+            if notification.start_time.elapsed() >= notification.duration {
+                self.notification = None;
+            }
+        }
     }
 
     /// Handles key events
@@ -199,7 +259,27 @@ impl TerminalUI {
             KeyCode::Char('q') => Some(MenuAction::Quit),
             KeyCode::Char('j') => Some(MenuAction::Join),
             KeyCode::Char('l') => Some(MenuAction::Leave),
+            KeyCode::Char('c') => Some(MenuAction::CopyLink),
             _ => None,
+        }
+    }
+
+    /// Handle menu actions
+    pub fn handle_menu_action(&mut self, action: MenuAction) -> bool {
+        match action {
+            MenuAction::CopyLink => {
+                let connection_link = self.connection_link.lock().unwrap().clone();
+                if let Some(link) = connection_link {
+                    self.copy_to_clipboard(&link);
+                } else {
+                    self.show_notification(
+                        "No active link to copy".to_string(),
+                        Duration::from_secs(2),
+                    );
+                }
+                false // Don't exit after copying
+            }
+            _ => false, // Let other actions be handled externally
         }
     }
 
@@ -213,6 +293,9 @@ impl TerminalUI {
 
     /// Renders the UI
     pub fn render(&mut self, _app: &App) -> io::Result<()> {
+        // Update notification state
+        self.update_notification();
+
         if let Some(terminal) = self.terminal.as_mut() {
             // Create local copies of all the data we need
             let menu_items = self.menu_items.clone();
@@ -220,31 +303,39 @@ impl TerminalUI {
             let participants = self.participants.lock().unwrap().clone();
             let connection_link = self.connection_link.lock().unwrap().clone();
             let audio_visualizer = self.audio_visualizer.clone();
+            let notification = self.notification.clone();
 
             // Create a local Layout function
-            let create_layout = |area: Rect| -> QuadrantLayout {
-                // First split the screen into top and bottom
+            let create_layout = |area: Rect| -> AppLayout {
+                // First split for top content and status bar
                 let vertical_split = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .constraints([
+                        Constraint::Min(5),    // Main content area
+                        Constraint::Length(3), // Status bar at bottom
+                    ])
                     .split(area);
 
-                // Then split each half horizontally
-                let top_split = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                // Split top area into two vertical sections
+                let top_areas = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(45), // Top section (menu and participants)
+                        Constraint::Percentage(55), // Bottom section (audio visualization)
+                    ])
                     .split(vertical_split[0]);
 
-                let bottom_split = Layout::default()
+                // Split the top section horizontally for menu and participants
+                let top_split = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(vertical_split[1]);
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(top_areas[0]);
 
-                QuadrantLayout {
-                    top_left: top_split[0],
-                    top_right: top_split[1],
-                    bottom_left: bottom_split[0],
-                    bottom_right: bottom_split[1],
+                AppLayout {
+                    menu_area: top_split[0],
+                    participants_area: top_split[1],
+                    audio_area: top_areas[1],
+                    status_bar: vertical_split[1],
                 }
             };
 
@@ -252,7 +343,7 @@ impl TerminalUI {
                 let area = frame.size();
                 let layout = create_layout(area);
 
-                // Render top-left quadrant (menu options)
+                // Render menu area (top left)
                 let menu_items: Vec<ListItem> = menu_items
                     .iter()
                     .map(|item| {
@@ -267,9 +358,9 @@ impl TerminalUI {
                     .block(Block::default().title("Menu").borders(Borders::ALL))
                     .highlight_style(Style::default().fg(Color::Yellow));
 
-                frame.render_stateful_widget(menu, layout.top_left, &mut menu_state);
+                frame.render_stateful_widget(menu, layout.menu_area, &mut menu_state);
 
-                // Render top-right quadrant (participant list)
+                // Render participants list (top right)
                 let participant_items: Vec<ListItem> = participants
                     .iter()
                     .map(|p| {
@@ -286,29 +377,45 @@ impl TerminalUI {
                 let participant_list = List::new(participant_items)
                     .block(Block::default().title("Participants").borders(Borders::ALL));
 
-                frame.render_widget(participant_list, layout.top_right);
+                frame.render_widget(participant_list, layout.participants_area);
 
-                // Render bottom-left quadrant (QR code and connection info)
-                let content = if let Some(link) = &connection_link {
-                    // Generate QR code
-                    let qr_code = generate_qr_code(link)
-                        .unwrap_or_else(|_| "Failed to generate QR code".to_string());
+                // Render audio visualization (bottom)
+                frame.render_widget(audio_visualizer, layout.audio_area);
 
-                    format!("Join Link:\n{}\n\n{}", link, qr_code)
-                } else {
-                    "No active session\nUse menu to join or create a session".to_string()
+                // Render status bar (very bottom - connection link and status)
+                let status_text = match &connection_link {
+                    Some(link) => {
+                        format!("Join Link: {} (Press 'c' to copy)", link)
+                    }
+                    None => "Not connected - use Join to create a session".to_string(),
                 };
 
-                let connection_info = Paragraph::new(content).block(
-                    Block::default()
-                        .title("Connection Info")
-                        .borders(Borders::ALL),
-                );
+                let status_bar = Paragraph::new(status_text)
+                    .style(Style::default())
+                    .block(Block::default().borders(Borders::ALL).title("Status"));
 
-                frame.render_widget(connection_info, layout.bottom_left);
+                frame.render_widget(status_bar, layout.status_bar);
 
-                // Render bottom-right quadrant (audio visualization)
-                frame.render_widget(audio_visualizer, layout.bottom_right);
+                // If there's an active notification, render it as an overlay
+                if let Some(notif) = notification {
+                    // Create a centered popup for the notification
+                    let notif_width = notif.message.len() as u16 + 4; // Add padding
+                    let notif_height = 3;
+                    let notif_x = (area.width - notif_width) / 2;
+                    let notif_y = (area.height - notif_height) / 2;
+
+                    let notif_area = Rect::new(notif_x, notif_y, notif_width, notif_height);
+
+                    let notification_widget = Paragraph::new(notif.message)
+                        .style(Style::default().fg(Color::White))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .style(Style::default().bg(Color::DarkGray)),
+                        );
+
+                    frame.render_widget(notification_widget, notif_area);
+                }
             })?;
         }
         Ok(())
@@ -337,6 +444,7 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
         if let Some(event) = terminal_ui.poll_events(timeout)? {
             match event {
                 Event::Key(key_event) => {
+                    // Handle Ctrl+C for exit
                     if key_event.modifiers.contains(KeyModifiers::CONTROL)
                         && key_event.code == KeyCode::Char('c')
                     {
@@ -344,6 +452,11 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
                     }
 
                     if let Some(action) = terminal_ui.handle_key_event(key_event.code) {
+                        // First handle internal actions like copy
+                        if terminal_ui.handle_menu_action(action.clone()) {
+                            continue;
+                        }
+
                         let mut app_lock = app.lock().unwrap();
                         match action {
                             MenuAction::Join => {
@@ -363,6 +476,9 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
                                     terminal_ui.set_connection_link(None);
                                     terminal_ui.update_participants(vec![]);
                                 }
+                            }
+                            MenuAction::CopyLink => {
+                                // Already handled in handle_menu_action
                             }
                             MenuAction::Quit => break,
                         }

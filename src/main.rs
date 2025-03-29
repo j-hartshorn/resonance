@@ -13,8 +13,6 @@ use ui::{qr_code::display_connection_options, run_tui, Participant};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting resonance.rs audio communication app");
-
     // Check if we're joining from a link via command line
     let args: Vec<String> = env::args().collect();
     let mut join_link = None;
@@ -125,13 +123,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // If we have a join link from command line, try to join immediately
     if let Some(link) = join_link {
-        match app.join_p2p_session(&link).await {
-            Ok(_) => {
-                if let Some(session) = app.current_session() {
-                    println!("Joined session successfully: {}", session.id);
-                }
-            }
-            Err(e) => println!("Failed to join session: {}", e),
+        if let Err(e) = app.join_p2p_session(&link).await {
+            eprintln!("Failed to join session: {}", e);
         }
     }
 

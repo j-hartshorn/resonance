@@ -8,7 +8,7 @@ use crate::network::{
     discover_public_endpoint, generate_connection_link, parse_connection_link, ConnectionManager,
     ConnectionState, Endpoint, Message,
 };
-use crate::ui::{qr_code::display_connection_options, Participant};
+use crate::ui::Participant;
 
 /// Represents a communication session
 #[derive(Debug, Clone)]
@@ -105,9 +105,6 @@ impl SessionManager {
             participants: vec![current_user],
             is_host: true,
         };
-
-        // Display connection options for sharing
-        display_connection_options(&connection_link)?;
 
         // Start listening for incoming connections
         // TODO: Implement a listener for incoming connections
