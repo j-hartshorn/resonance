@@ -113,14 +113,16 @@ impl AudioVisualizationWidget {
 
             // Apply a more dramatic curve to suppress small amplitudes
             // and enhance medium-to-loud sounds (better for speech)
-            if *mag < -60.0 {
-                *mag = 0.0; // Noise gate - cut off very quiet sounds
+            // Using a higher noise floor (-45dB instead of -60dB)
+            if *mag < -45.0 {
+                *mag = 0.0; // Stronger noise gate to reduce background noise
             } else {
                 // Normalize to 0.0 - 1.0 range with emphasis on speech levels
-                *mag = (*mag + 60.0) / 60.0; // Map -60dB..0dB to 0..1
+                *mag = (*mag + 45.0) / 45.0; // Map -45dB..0dB to 0..1
 
                 // Apply non-linear curve to enhance mid-range values (speech volumes)
-                *mag = (*mag * *mag) * 1.3; // Square to enhance contrast
+                // Using a cubic function for more dramatic effect on medium levels
+                *mag = (*mag * *mag * *mag) * 1.5; // Cubic to enhance contrast
                 *mag = mag.max(0.0).min(1.0); // Clamp to 0-1
             }
         }
@@ -136,16 +138,23 @@ impl AudioVisualizationWidget {
             let nyquist = sample_rate / 2.0;
             let freq_per_bin = nyquist / magnitudes.len() as f32;
 
-            // Define vocal-focused frequency bands (in Hz)
+            // Revised frequency bands with more even spacing
+            // Particularly addressing the issue with the second band
             let freq_bands = [
-                // Sub-bass and bass (male voice fundamentals)
-                80.0, 100.0, 125.0, 160.0, 200.0,
+                // Low end (less prone to false triggers)
+                120.0, 150.0, 180.0, 220.0, 260.0,
                 // Mid-range (female voice fundamentals)
-                250.0, 315.0, 400.0, 500.0, 630.0,
+                300.0, 350.0, 420.0, 500.0, 600.0,
                 // Upper mid-range (important for speech clarity)
-                800.0, 1000.0, 1250.0, 1600.0, 2000.0, // Presence and brilliance
-                2500.0, 3150.0, 4000.0, 5000.0, 6300.0, // Upper frequencies
-                8000.0, 10000.0, 12500.0, 16000.0,
+                750.0, 900.0, 1100.0, 1300.0, 1600.0, // Presence and brilliance
+                2000.0, 2500.0, 3200.0, 4000.0, 5000.0, // Upper frequencies
+                6300.0, 8000.0, 10000.0, 13000.0, 16000.0,
+            ];
+
+            // Apply additional low frequency attenuation for first few bands
+            let low_freq_attenuation = [
+                0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+                1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
             ];
 
             // Calculate spectrum based on these bands
@@ -161,8 +170,20 @@ impl AudioVisualizationWidget {
                 let end = end_bin.min(magnitudes.len());
 
                 if start < end {
-                    let avg_magnitude =
+                    let mut avg_magnitude =
                         magnitudes[start..end].iter().sum::<f32>() / (end - start) as f32;
+
+                    // Apply low frequency attenuation
+                    if i < low_freq_attenuation.len() {
+                        avg_magnitude *= low_freq_attenuation[i];
+                    }
+
+                    // Apply compensation for human hearing response
+                    // We're less sensitive to low frequencies, so boost them slightly
+                    if i > 5 && i < 15 {
+                        avg_magnitude *= 1.2; // Boost mid frequencies where vocals are most present
+                    }
+
                     new_spectrum.push(avg_magnitude);
                 } else {
                     new_spectrum.push(0.0);
@@ -198,7 +219,7 @@ impl AudioVisualizationWidget {
             let mut total_weight = 0.0;
 
             for (i, frame) in history.iter().enumerate() {
-                let weight = (i + 1) as f32; // More recent frames get higher weight
+                let weight = (i + 1) as f32 * 1.5; // More recent frames get higher weight
                 total_weight += weight;
 
                 for (bin, &value) in frame.iter().enumerate() {
@@ -272,8 +293,22 @@ impl Widget for AudioVisualizationWidget {
         let bar_width = inner_area.width / spectrum_data.len() as u16;
         let bar_width = bar_width.max(1); // Ensure minimum width of 1
 
+        // Draw small indicator lines at the bottom for all bars
+        for i in 0..spectrum_data.len() {
+            let x = inner_area.x + (i as u16 * bar_width);
+            let base_y = inner_area.y + inner_area.height - 1;
+
+            // Draw a small mark at the bottom for each bar position
+            let style = Style::default().fg(Color::DarkGray);
+            buf.get_mut(x + bar_width / 2, base_y)
+                .set_symbol("-")
+                .set_style(style);
+        }
+
         for (i, &magnitude) in spectrum_data.iter().enumerate() {
-            let bar_height = (magnitude * magnitude * max_height as f32) as u16; // Apply quadratic scaling
+            // Apply a slightly stronger scaling curve for better visual dynamics
+            let scaled_magnitude = magnitude.powf(1.5); // Using power 1.5 for better scaling
+            let bar_height = (scaled_magnitude * max_height as f32) as u16;
             let bar_height = bar_height.min(max_height);
 
             // Skip if no height
@@ -288,18 +323,21 @@ impl Widget for AudioVisualizationWidget {
             for y in 0..bar_height {
                 let current_y = inner_area.y + inner_area.height - y - 1;
 
-                // Color gradient based on frequency and amplitude
-                let style = if i < spectrum_data.len() / 4 {
-                    // Low frequencies (male voice range) - deep blue to blue
+                // Revised color gradient based on frequency ranges
+                let style = if i < spectrum_data.len() / 5 {
+                    // Low bass frequencies (deep male voice range) - blue
                     Style::default().fg(Color::Blue)
-                } else if i < spectrum_data.len() / 2 {
-                    // Low-mid frequencies (female voice range) - blue to green
+                } else if i < 2 * spectrum_data.len() / 5 {
+                    // Low-mid frequencies (female voice range) - cyan to green
+                    Style::default().fg(Color::Cyan)
+                } else if i < 3 * spectrum_data.len() / 5 {
+                    // Mid frequencies (vowels, vocal clarity) - green
                     Style::default().fg(Color::Green)
-                } else if i < 3 * spectrum_data.len() / 4 {
-                    // Mid-high frequencies (consonants, clarity) - green to yellow
+                } else if i < 4 * spectrum_data.len() / 5 {
+                    // Upper-mid frequencies (consonants) - yellow
                     Style::default().fg(Color::Yellow)
                 } else {
-                    // High frequencies - yellow to red
+                    // High frequencies - red
                     Style::default().fg(Color::Red)
                 };
 
