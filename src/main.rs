@@ -231,14 +231,85 @@ async fn run_tui_with_audio(
                                 }
                             }
                             ui::MenuAction::Join => {
-                                // For this example, we'll just create a new session
-                                // In a real implementation, this would prompt for a link
-                                if let Ok(session) = app_lock.create_p2p_session().await {
-                                    terminal_ui
-                                        .set_connection_link(Some(session.connection_link.clone()));
-                                    terminal_ui.update_participants(session.participants.clone());
-                                    // Update menu for active connection
-                                    terminal_ui.update_menu_items(true);
+                                // Show input prompt for session link
+                                terminal_ui.show_text_input_popup("Enter session link to join:");
+
+                                // Release the lock during input to avoid deadlock
+                                drop(app_lock);
+
+                                // Process events until we get input or cancel
+                                loop {
+                                    // Use a shorter tick rate for responsive input
+                                    let input_timeout = Duration::from_millis(16); // ~60FPS for responsive input
+
+                                    if let Some(event) = terminal_ui.poll_events(input_timeout)? {
+                                        if let crossterm::event::Event::Key(key_event) = event {
+                                            // Handle Ctrl+C for exit during input
+                                            if key_event
+                                                .modifiers
+                                                .contains(crossterm::event::KeyModifiers::CONTROL)
+                                                && key_event.code
+                                                    == crossterm::event::KeyCode::Char('c')
+                                            {
+                                                terminal_ui.close_text_input();
+                                                break;
+                                            }
+
+                                            // Let the terminal_ui handle the input
+                                            terminal_ui.handle_key_event(key_event.code);
+                                        }
+                                    }
+
+                                    // Render UI during input
+                                    terminal_ui.render(&app.lock().unwrap())?;
+
+                                    // Check if text input is still active
+                                    if let Some(text_input) = terminal_ui.get_input_text() {
+                                        if !terminal_ui.is_text_input_active() {
+                                            // Input finished, close the input
+                                            terminal_ui.close_text_input();
+
+                                            // If we have a link, try to join the session
+                                            if !text_input.trim().is_empty() {
+                                                let mut app_lock = app.lock().unwrap();
+                                                match app_lock.join_p2p_session(&text_input).await {
+                                                    Ok(()) => {
+                                                        if let Some(session) =
+                                                            app_lock.current_session()
+                                                        {
+                                                            terminal_ui.set_connection_link(Some(
+                                                                session.connection_link.clone(),
+                                                            ));
+                                                            terminal_ui.update_participants(
+                                                                session.participants.clone(),
+                                                            );
+                                                            // Update menu for active connection
+                                                            terminal_ui.update_menu_items(true);
+                                                            terminal_ui.show_notification(
+                                                                "Successfully joined session"
+                                                                    .to_string(),
+                                                                Duration::from_secs(2),
+                                                            );
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        // Show error notification
+                                                        terminal_ui.show_notification(
+                                                            format!(
+                                                                "Failed to join session: {}",
+                                                                e
+                                                            ),
+                                                            Duration::from_secs(3),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    } else {
+                                        // Input was closed
+                                        break;
+                                    }
                                 }
                             }
                             ui::MenuAction::Leave => {

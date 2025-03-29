@@ -59,6 +59,15 @@ struct Notification {
     duration: Duration,
 }
 
+/// Represents a text input popup
+#[derive(Debug, Clone)]
+struct TextInput {
+    prompt: String,
+    input: String,
+    cursor_position: usize,
+    active: bool,
+}
+
 /// Main UI controller that manages terminal rendering
 pub struct TerminalUI {
     terminal: Option<Terminal<CrosstermBackend<io::Stdout>>>,
@@ -70,6 +79,7 @@ pub struct TerminalUI {
     connection_link: Arc<Mutex<Option<String>>>,
     notification: Option<Notification>,
     clipboard: Option<ClipboardContext>,
+    text_input: Option<TextInput>,
 }
 
 impl TerminalUI {
@@ -94,6 +104,7 @@ impl TerminalUI {
             connection_link: Arc::new(Mutex::new(None)),
             notification: None,
             clipboard,
+            text_input: None,
         }
     }
 
@@ -128,40 +139,6 @@ impl TerminalUI {
         }
         self.running.store(false, Ordering::SeqCst);
         Ok(())
-    }
-
-    /// Creates the application layout
-    pub fn create_layout(&self, area: Rect) -> AppLayout {
-        // First split for top content and status bar
-        let vertical_split = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(5),    // Main content area
-                Constraint::Length(3), // Status bar at bottom
-            ])
-            .split(area);
-
-        // Split top area into two vertical sections
-        let top_areas = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(45), // Top section (menu and participants)
-                Constraint::Percentage(55), // Bottom section (audio visualization)
-            ])
-            .split(vertical_split[0]);
-
-        // Split the top section horizontally for menu and participants
-        let top_split = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(top_areas[0]);
-
-        AppLayout {
-            menu_area: top_split[0],
-            participants_area: top_split[1],
-            audio_area: top_areas[1],
-            status_bar: vertical_split[1],
-        }
     }
 
     /// Updates the list of participants
@@ -214,8 +191,91 @@ impl TerminalUI {
         }
     }
 
+    /// Shows a text input popup with the given prompt
+    pub fn show_text_input_popup(&mut self, prompt: &str) {
+        self.text_input = Some(TextInput {
+            prompt: prompt.to_string(),
+            input: String::new(),
+            cursor_position: 0,
+            active: true,
+        });
+    }
+
+    /// Closes the text input popup
+    pub fn close_text_input(&mut self) {
+        self.text_input = None;
+    }
+
+    /// Gets the current text input, if any
+    pub fn get_input_text(&self) -> Option<String> {
+        self.text_input.as_ref().map(|input| input.input.clone())
+    }
+
+    /// Checks if the text input is still active
+    pub fn is_text_input_active(&self) -> bool {
+        self.text_input.as_ref().map_or(false, |input| input.active)
+    }
+
+    /// Handles key events for text input
+    fn handle_text_input_key(&mut self, key: KeyCode) -> bool {
+        if let Some(text_input) = &mut self.text_input {
+            match key {
+                KeyCode::Char(c) => {
+                    text_input.input.insert(text_input.cursor_position, c);
+                    text_input.cursor_position += 1;
+                    true
+                }
+                KeyCode::Backspace => {
+                    if text_input.cursor_position > 0 {
+                        text_input.cursor_position -= 1;
+                        text_input.input.remove(text_input.cursor_position);
+                    }
+                    true
+                }
+                KeyCode::Delete => {
+                    if text_input.cursor_position < text_input.input.len() {
+                        text_input.input.remove(text_input.cursor_position);
+                    }
+                    true
+                }
+                KeyCode::Left => {
+                    if text_input.cursor_position > 0 {
+                        text_input.cursor_position -= 1;
+                    }
+                    true
+                }
+                KeyCode::Right => {
+                    if text_input.cursor_position < text_input.input.len() {
+                        text_input.cursor_position += 1;
+                    }
+                    true
+                }
+                KeyCode::Enter => {
+                    text_input.active = false;
+                    true
+                }
+                KeyCode::Esc => {
+                    // Clear the input and deactivate
+                    text_input.input.clear();
+                    text_input.active = false;
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
     /// Handles key events
     pub fn handle_key_event(&mut self, key: KeyCode) -> Option<MenuAction> {
+        // If text input is active, handle that first
+        if self.text_input.is_some() {
+            if self.handle_text_input_key(key) {
+                return None;
+            }
+        }
+
         match key {
             KeyCode::Up => {
                 // Move menu selection up
@@ -289,9 +349,12 @@ impl TerminalUI {
             let connection_link = self.connection_link.lock().unwrap().clone();
             let audio_visualizer = self.audio_visualizer.clone();
             let notification = self.notification.clone();
+            let text_input = self.text_input.clone();
 
-            // Create a local Layout function
-            let create_layout = |area: Rect| -> AppLayout {
+            terminal.draw(|frame| {
+                let area = frame.size();
+
+                // Create layout directly instead of calling self.create_layout
                 // First split for top content and status bar
                 let vertical_split = Layout::default()
                     .direction(Direction::Vertical)
@@ -316,17 +379,12 @@ impl TerminalUI {
                     .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
                     .split(top_areas[0]);
 
-                AppLayout {
+                let layout = AppLayout {
                     menu_area: top_split[0],
                     participants_area: top_split[1],
                     audio_area: top_areas[1],
                     status_bar: vertical_split[1],
-                }
-            };
-
-            terminal.draw(move |frame| {
-                let area = frame.size();
-                let layout = create_layout(area);
+                };
 
                 // Render menu area (top left)
                 let menu_items: Vec<ListItem> = menu_items
@@ -400,6 +458,41 @@ impl TerminalUI {
                         );
 
                     frame.render_widget(notification_widget, notif_area);
+                }
+
+                // Render text input if active
+                if let Some(input) = text_input {
+                    // Create a centered popup for the text input
+                    let input_width = std::cmp::max(50, input.prompt.len() as u16 + 4);
+                    let input_height = 5;
+                    let input_x = (area.width - input_width) / 2;
+                    let input_y = (area.height - input_height) / 2;
+
+                    let input_area = Rect::new(input_x, input_y, input_width, input_height);
+
+                    // Create a paragraph for the input field
+                    let input_text = format!("{}\n{}", input.prompt, input.input);
+                    let input_widget = Paragraph::new(input_text)
+                        .style(Style::default().fg(Color::White))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title("Enter Session Link")
+                                .style(Style::default().bg(Color::Black)),
+                        );
+
+                    // Render the input widget
+                    frame.render_widget(input_widget, input_area);
+
+                    // If the input is active, show the cursor
+                    if input.active {
+                        // Calculate cursor position (prompt length + newline + cursor position)
+                        let cursor_x = input_x + 1 + input.cursor_position as u16;
+                        let cursor_y = input_y + 2; // 1 for border, 1 for prompt
+
+                        // Set cursor
+                        frame.set_cursor(cursor_x, cursor_y);
+                    }
                 }
             })?;
         }
