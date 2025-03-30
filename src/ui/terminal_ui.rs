@@ -48,6 +48,8 @@ pub enum MenuAction {
     Join,
     Leave,
     CopyLink,
+    Settings,
+    TestSession,
     Quit,
 }
 
@@ -305,6 +307,8 @@ impl TerminalUI {
             KeyCode::Char('j') => Some(MenuAction::Join),
             KeyCode::Char('l') => Some(MenuAction::Leave),
             KeyCode::Char('c') => Some(MenuAction::CopyLink),
+            KeyCode::Char('s') => Some(MenuAction::Settings),
+            KeyCode::Char('t') => Some(MenuAction::TestSession),
             _ => None,
         }
     }
@@ -513,6 +517,10 @@ impl TerminalUI {
                     action: MenuAction::CopyLink,
                 },
                 MenuItem {
+                    label: "Settings".to_string(),
+                    action: MenuAction::Settings,
+                },
+                MenuItem {
                     label: "Quit".to_string(),
                     action: MenuAction::Quit,
                 },
@@ -527,6 +535,10 @@ impl TerminalUI {
                 MenuItem {
                     label: "Join Session".to_string(),
                     action: MenuAction::Join,
+                },
+                MenuItem {
+                    label: "Settings".to_string(),
+                    action: MenuAction::Settings,
                 },
                 MenuItem {
                     label: "Quit".to_string(),
@@ -616,6 +628,12 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
                             }
                             MenuAction::CopyLink => {
                                 // Already handled in handle_menu_action
+                            }
+                            MenuAction::Settings => {
+                                // This is handled in main.rs
+                            }
+                            MenuAction::TestSession => {
+                                // This is handled in main.rs
                             }
                             MenuAction::Quit => break,
                         }

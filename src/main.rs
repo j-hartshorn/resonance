@@ -328,6 +328,92 @@ async fn run_tui_with_audio(
                             ui::MenuAction::CopyLink => {
                                 // Already handled in handle_menu_action
                             }
+                            ui::MenuAction::Settings => {
+                                // Show settings menu
+                                terminal_ui.show_text_input_popup("Settings");
+
+                                // Release the lock during input to avoid deadlock
+                                drop(app_lock);
+
+                                // Show a sub-menu with settings options
+                                let settings_options = vec!["1. Create Test Session", "2. Cancel"];
+
+                                // Display settings options
+                                terminal_ui.show_notification(
+                                    settings_options.join("\n"),
+                                    Duration::from_secs(5),
+                                );
+
+                                // Process input for settings
+                                loop {
+                                    let input_timeout = Duration::from_millis(16);
+
+                                    if let Some(event) = terminal_ui.poll_events(input_timeout)? {
+                                        if let crossterm::event::Event::Key(key_event) = event {
+                                            // Handle key events for settings
+                                            match key_event.code {
+                                                crossterm::event::KeyCode::Char('1') => {
+                                                    // Create test session
+                                                    terminal_ui.close_text_input();
+
+                                                    let mut app_lock = app.lock().unwrap();
+                                                    if let Ok(session) =
+                                                        app_lock.create_test_session().await
+                                                    {
+                                                        terminal_ui.update_participants(
+                                                            session.participants.clone(),
+                                                        );
+                                                        terminal_ui.set_connection_link(Some(
+                                                            "Test Session".to_string(),
+                                                        ));
+                                                        terminal_ui.update_menu_items(true);
+                                                        terminal_ui.show_notification(
+                                                            "Test session created with 3 simulated participants".to_string(),
+                                                            Duration::from_secs(2),
+                                                        );
+                                                    } else {
+                                                        terminal_ui.show_notification(
+                                                            "Failed to create test session"
+                                                                .to_string(),
+                                                            Duration::from_secs(2),
+                                                        );
+                                                    }
+                                                    break;
+                                                }
+                                                crossterm::event::KeyCode::Char('2')
+                                                | crossterm::event::KeyCode::Esc => {
+                                                    // Cancel
+                                                    terminal_ui.close_text_input();
+                                                    break;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+
+                                    // Render UI during input
+                                    terminal_ui.render(&app.lock().unwrap())?;
+
+                                    // Check if text input is still active
+                                    if !terminal_ui.is_text_input_active() {
+                                        break;
+                                    }
+                                }
+                            }
+                            ui::MenuAction::TestSession => {
+                                // Directly create a test session
+                                if let Ok(session) = app_lock.create_test_session().await {
+                                    terminal_ui.update_participants(session.participants.clone());
+                                    terminal_ui
+                                        .set_connection_link(Some("Test Session".to_string()));
+                                    terminal_ui.update_menu_items(true);
+                                    terminal_ui.show_notification(
+                                        "Test session created with 3 simulated participants"
+                                            .to_string(),
+                                        Duration::from_secs(2),
+                                    );
+                                }
+                            }
                             ui::MenuAction::Quit => break,
                         }
                     }
@@ -393,6 +479,42 @@ async fn run_tui_with_audio(
                                         {
                                             eprintln!("Error adding participant stream: {}", e);
                                             last_error_time = now;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check if we're in a test session and get test audio data
+                        let app_lock = app.lock().unwrap();
+                        let is_test_session = app_lock
+                            .current_session()
+                            .map(|s| s.connection_link == "test-session")
+                            .unwrap_or(false);
+
+                        if is_test_session {
+                            // Process audio for each test participant
+                            for (i, participant) in updated_participants.iter().enumerate().skip(1)
+                            {
+                                if i <= 3 {
+                                    // We have 3 test participants
+                                    // Get the test audio data for this participant
+                                    let test_audio = app_lock.get_test_participant_audio(i - 1);
+
+                                    if !test_audio.is_empty() {
+                                        // Process the audio data and add it to the participant's stream
+                                        if let Err(e) = audio_manager_guard
+                                            .process_remote_audio(&participant.name, &test_audio)
+                                            .await
+                                        {
+                                            // Log errors but don't interrupt
+                                            let now = std::time::Instant::now();
+                                            if now.duration_since(last_error_time)
+                                                > error_throttle_duration
+                                            {
+                                                eprintln!("Error processing test audio: {}", e);
+                                                last_error_time = now;
+                                            }
                                         }
                                     }
                                 }

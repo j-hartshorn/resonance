@@ -1,5 +1,6 @@
 pub mod config;
 pub mod session;
+pub mod test_session;
 
 use std::fs;
 use std::path::Path;
@@ -8,6 +9,7 @@ use std::str::FromStr;
 use crate::network::ConnectionState;
 use config::Config;
 use session::{Session, SessionError, SessionManager};
+use test_session::TestSessionManager;
 
 /// Main application struct that coordinates all components
 pub struct App {
@@ -15,6 +17,7 @@ pub struct App {
     config: Config,
     pub session_manager: Option<SessionManager>,
     current_session: Option<Session>,
+    test_session_manager: Option<TestSessionManager>,
 }
 
 impl App {
@@ -25,6 +28,7 @@ impl App {
             config: Config::default(),
             session_manager: None,
             current_session: None,
+            test_session_manager: None,
         }
     }
 
@@ -35,6 +39,7 @@ impl App {
             config,
             session_manager: None,
             current_session: None,
+            test_session_manager: None,
         }
     }
 
@@ -43,6 +48,11 @@ impl App {
         if self.session_manager.is_none() {
             let session_manager = SessionManager::new();
             self.session_manager = Some(session_manager);
+        }
+
+        if self.test_session_manager.is_none() {
+            let test_session_manager = TestSessionManager::new();
+            self.test_session_manager = Some(test_session_manager);
         }
 
         Ok(())
@@ -110,8 +120,16 @@ impl App {
             .map_err(|e| format!("Failed to join P2P session: {}", e))
     }
 
-    /// Leaves the current audio session
+    /// Leaves the current session (regular or test)
     pub async fn leave_session(&mut self) -> Result<(), String> {
+        // Check if we have a test session
+        if let Some(test_session_manager) = &mut self.test_session_manager {
+            if test_session_manager.current_session().is_some() {
+                return self.leave_test_session().await;
+            }
+        }
+
+        // Otherwise try to leave a regular session
         let session_manager = self
             .session_manager
             .as_mut()
@@ -125,11 +143,23 @@ impl App {
 
     /// Gets the current session, if any
     pub fn current_session(&self) -> Option<Session> {
-        // Get a copy of the session instead of a reference
+        // First check our cached copy
+        if let Some(session) = &self.current_session {
+            return Some(session.clone());
+        }
+
+        // Then check the test session manager
+        if let Some(test_manager) = &self.test_session_manager {
+            if let Some(session) = test_manager.current_session() {
+                return Some(session);
+            }
+        }
+
+        // Finally check the regular session manager
         if let Some(sm) = self.session_manager.as_ref() {
             sm.current_session()
         } else {
-            self.current_session.clone()
+            None
         }
     }
 
@@ -144,9 +174,20 @@ impl App {
 
     /// Check if the app has an active connection
     pub async fn has_active_connection(&self) -> bool {
+        // Check if we have a regular session
         if let Some(session_manager) = &self.session_manager {
-            return session_manager.has_active_connection().await;
+            if session_manager.has_active_connection().await {
+                return true;
+            }
         }
+
+        // Check if we have a test session
+        if let Some(test_session_manager) = &self.test_session_manager {
+            if test_session_manager.current_session().is_some() {
+                return true;
+            }
+        }
+
         false
     }
 
@@ -213,6 +254,56 @@ impl App {
 
         self.initialized = false;
         Ok(())
+    }
+
+    /// Creates a test session with simulated participants
+    pub async fn create_test_session(&mut self) -> Result<Session, String> {
+        // First leave any existing session
+        if self.has_active_connection().await {
+            self.leave_session().await?;
+        }
+
+        let test_session_manager = self
+            .test_session_manager
+            .as_mut()
+            .ok_or_else(|| "Test session manager not initialized".to_string())?;
+
+        let session = test_session_manager
+            .create_test_session()
+            .await
+            .map_err(|e| format!("Failed to create test session: {}", e))?;
+
+        // Update our current session
+        self.current_session = Some(session.clone());
+
+        Ok(session)
+    }
+
+    /// Leaves the current test session
+    pub async fn leave_test_session(&mut self) -> Result<(), String> {
+        let test_session_manager = self
+            .test_session_manager
+            .as_mut()
+            .ok_or_else(|| "Test session manager not initialized".to_string())?;
+
+        test_session_manager
+            .leave_test_session()
+            .await
+            .map_err(|e| format!("Failed to leave test session: {}", e))?;
+
+        // Clear our current session
+        self.current_session = None;
+
+        Ok(())
+    }
+
+    /// Gets test audio data for a participant
+    pub fn get_test_participant_audio(&self, index: usize) -> Vec<f32> {
+        if let Some(test_session_manager) = &self.test_session_manager {
+            test_session_manager.get_participant_audio(index)
+        } else {
+            Vec::new()
+        }
     }
 }
 
