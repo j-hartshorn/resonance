@@ -10,7 +10,7 @@ use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use ui::{qr_code::display_connection_options, run_tui, Participant};
+use ui::{qr_code::display_connection_options, run_tui, Participant, SettingsManager};
 
 // Default sample rate for all audio processing
 const DEFAULT_SAMPLE_RATE: u32 = 48000;
@@ -29,10 +29,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
     app.initialize().await?;
 
-    // Initialize the audio stream manager with a specific sample rate
+    // Create and initialize audio manager
     let mut audio_manager = AudioStreamManager::new();
     audio_manager.set_sample_rate(DEFAULT_SAMPLE_RATE)?;
     audio_manager.initialize()?;
+
+    // Load device settings from application config
+    let app_config = app.config().clone();
+
+    // Set input device if configured
+    if let Some(input_device_id) = &app_config.input_device {
+        // Find the device with the matching ID
+        let input_devices = audio_manager.get_input_devices();
+        if let Some(device) = input_devices.iter().find(|d| &d.id == input_device_id) {
+            match audio_manager.set_input_device(device.clone()).await {
+                Ok(_) => println!("Using configured input device: {}", device.name),
+                Err(e) => eprintln!("Failed to set input device from config: {}", e),
+            }
+        }
+    }
+
+    // Set output device if configured
+    if let Some(output_device_id) = &app_config.output_device {
+        // Find the device with the matching ID
+        let output_devices = audio_manager.get_output_devices();
+        if let Some(device) = output_devices.iter().find(|d| &d.id == output_device_id) {
+            match audio_manager.set_output_device(device.clone()) {
+                Ok(_) => println!("Using configured output device: {}", device.name),
+                Err(e) => eprintln!("Failed to set output device from config: {}", e),
+            }
+        }
+    }
+
+    // Create a default session stream
+    match audio_manager
+        .create_stream("default-session".to_string())
+        .await
+    {
+        Ok(_stream) => {
+            // Successfully created stream
+        }
+        Err(e) => {
+            eprintln!("Error creating audio stream: {}", e);
+        }
+    }
 
     // Create participant for ourselves with initial position at the center (0,0,0)
     let current_user = Participant::new("Me").with_position(0.0, 0.0, 0.0);
@@ -119,15 +159,23 @@ async fn run_tui_with_audio(
     participants: Arc<Mutex<Vec<Participant>>>,
 ) -> io::Result<()> {
     // Initialize terminal
-    let mut terminal_ui = ui::terminal_ui::TerminalUI::new();
-    terminal_ui.initialize()?;
+    let terminal_ui = ui::terminal_ui::TerminalUI::new();
 
-    // Check if we're already in a session and set menu items accordingly
-    let has_connection = {
-        let app_lock = app.lock().unwrap();
-        app_lock.has_active_connection().await
-    };
-    terminal_ui.update_menu_items(has_connection);
+    // Create a shared terminal_ui reference for settings manager
+    let terminal_ui_arc = Arc::new(Mutex::new(terminal_ui));
+
+    // Create settings manager
+    let settings_manager = SettingsManager::new(
+        Arc::clone(&app),
+        Arc::clone(&audio_manager),
+        Arc::clone(&terminal_ui_arc),
+    );
+
+    // Initialize the terminal UI
+    {
+        let mut terminal_ui = terminal_ui_arc.lock().unwrap();
+        terminal_ui.initialize()?;
+    }
 
     // Create an audio stream
     if let Ok(mut audio_manager_guard) = audio_manager.lock() {
@@ -144,24 +192,30 @@ async fn run_tui_with_audio(
         }
     }
 
-    // Main event loop
+    // Main application loop
+    let mut running = true;
     let tick_rate = Duration::from_millis(33); // ~30 FPS
-    let audio_update_rate = Duration::from_millis(200); // Update participant positions every 200ms
     let mut last_tick = std::time::Instant::now();
+
+    // For audio data updates
+    let audio_update_rate = Duration::from_millis(100); // 10 Hz
     let mut last_audio_update = std::time::Instant::now();
 
-    // For throttling error messages
+    // For error rate limiting
+    let error_throttle_duration = Duration::from_secs(1);
     let mut last_error_time = std::time::Instant::now();
-    let error_throttle_duration = std::time::Duration::from_secs(5);
 
-    loop {
-        // Check if enough time has passed for a frame update
-        let timeout = tick_rate
-            .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_secs(0));
+    while running {
+        // Manage locks carefully - only hold for short periods
+        let mut terminal_ui = terminal_ui_arc.lock().unwrap();
 
-        // Poll for events
-        if let Some(event) = terminal_ui.poll_events(timeout)? {
+        // Check if we're already in a session and set menu items accordingly
+        let has_active_session = app_connection.has_active_connection().await;
+        terminal_ui.update_menu_items(has_active_session);
+
+        // Handle events and user input
+        let input_timeout = Duration::from_millis(16);
+        if let Some(event) = terminal_ui.poll_events(input_timeout)? {
             match event {
                 crossterm::event::Event::Key(key_event) => {
                     // Handle Ctrl+C for exit
@@ -170,6 +224,7 @@ async fn run_tui_with_audio(
                         .contains(crossterm::event::KeyModifiers::CONTROL)
                         && key_event.code == crossterm::event::KeyCode::Char('c')
                     {
+                        running = false;
                         break;
                     }
 
@@ -192,229 +247,66 @@ async fn run_tui_with_audio(
                                 }
                             }
                             ui::MenuAction::Join => {
-                                // Show input prompt for session link
-                                terminal_ui.show_text_input_popup("Enter session link to join:");
-
-                                // Release the lock during input to avoid deadlock
-                                drop(app_lock);
-
-                                // Process events until we get input or cancel
-                                loop {
-                                    // Use a shorter tick rate for responsive input
-                                    let input_timeout = Duration::from_millis(16); // ~60FPS for responsive input
-
-                                    if let Some(event) = terminal_ui.poll_events(input_timeout)? {
-                                        if let crossterm::event::Event::Key(key_event) = event {
-                                            // Handle Ctrl+C for exit during input
-                                            if key_event
-                                                .modifiers
-                                                .contains(crossterm::event::KeyModifiers::CONTROL)
-                                                && key_event.code
-                                                    == crossterm::event::KeyCode::Char('c')
-                                            {
-                                                terminal_ui.close_text_input();
-                                                break;
-                                            }
-
-                                            // Let the terminal_ui handle the input
-                                            terminal_ui.handle_key_event(key_event.code);
-                                        }
-                                    }
-
-                                    // Render UI during input
-                                    let audio_data = {
-                                        if let Ok(audio_manager) = audio_manager.lock() {
-                                            audio_manager.get_raw_capture_data()
-                                        } else {
-                                            Vec::new()
-                                        }
-                                    };
-
-                                    if !audio_data.is_empty() {
-                                        terminal_ui.update_audio_data(&audio_data);
-                                    }
-
-                                    terminal_ui.render(&app.lock().unwrap())?;
-
-                                    // Check if text input is still active
-                                    if let Some(text_input) = terminal_ui.get_input_text() {
-                                        if !terminal_ui.is_text_input_active() {
-                                            // Input finished, close the input
-                                            terminal_ui.close_text_input();
-
-                                            // If we have a link, try to join the session
-                                            if !text_input.trim().is_empty() {
-                                                let mut app_lock = app.lock().unwrap();
-                                                match app_lock.join_p2p_session(&text_input).await {
-                                                    Ok(()) => {
-                                                        if let Some(session) =
-                                                            app_lock.current_session()
-                                                        {
-                                                            terminal_ui.set_connection_link(Some(
-                                                                session.connection_link.clone(),
-                                                            ));
-                                                            terminal_ui.update_participants(
-                                                                session.participants.clone(),
-                                                            );
-                                                            // Update menu for active connection
-                                                            terminal_ui.update_menu_items(true);
-                                                            terminal_ui.show_notification(
-                                                                "Successfully joined session"
-                                                                    .to_string(),
-                                                                Duration::from_secs(2),
-                                                            );
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        // Show error notification
-                                                        terminal_ui.show_notification(
-                                                            format!(
-                                                                "Failed to join session: {}",
-                                                                e
-                                                            ),
-                                                            Duration::from_secs(3),
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    } else {
-                                        // Input was closed
-                                        break;
-                                    }
-                                }
+                                terminal_ui.show_text_input_popup("Enter Session Link");
                             }
                             ui::MenuAction::Leave => {
-                                if app_lock.has_active_connection().await {
-                                    // Show a notification that we're leaving
-                                    terminal_ui.show_notification(
-                                        "Leaving session...".to_string(),
-                                        Duration::from_secs(1),
-                                    );
+                                if let Err(e) = app_lock.leave_session().await {
+                                    eprintln!("Error leaving session: {}", e);
+                                }
 
-                                    // Actually leave the session
-                                    match app_lock.leave_session().await {
-                                        Ok(_) => {
-                                            // Clear UI state
-                                            terminal_ui.set_connection_link(None);
-                                            terminal_ui.update_participants(vec![]);
-                                            // Update menu for no active connection
-                                            terminal_ui.update_menu_items(false);
-                                            terminal_ui.show_notification(
-                                                "Session left successfully".to_string(),
-                                                Duration::from_secs(2),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            terminal_ui.show_notification(
-                                                format!("Error leaving session: {}", e),
-                                                Duration::from_secs(3),
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    // Already not in a session
-                                    terminal_ui.show_notification(
-                                        "Not in a session".to_string(),
-                                        Duration::from_secs(2),
-                                    );
-                                    // Make sure UI is in the correct state
-                                    terminal_ui.set_connection_link(None);
-                                    terminal_ui.update_participants(vec![]);
-                                    terminal_ui.update_menu_items(false);
+                                // Stop audio streams
+                                let mut audio_manager_guard = audio_manager.lock().unwrap();
+                                if let Err(e) = audio_manager_guard.stop_all_streams().await {
+                                    eprintln!("Error stopping audio streams: {}", e);
                                 }
                             }
                             ui::MenuAction::CopyLink => {
-                                // Already handled in handle_menu_action
+                                // Already handled by terminal UI
                             }
                             ui::MenuAction::Settings => {
-                                // Show settings menu
-                                terminal_ui.show_text_input_popup("Settings");
-
-                                // Release the lock during input to avoid deadlock
+                                // Release app_lock to avoid deadlock
                                 drop(app_lock);
 
-                                // Show a sub-menu with settings options
-                                let settings_options = vec!["1. Create Test Session", "2. Cancel"];
-
-                                // Display settings options
-                                terminal_ui.show_notification(
-                                    settings_options.join("\n"),
-                                    Duration::from_secs(5),
+                                let settings_manager = SettingsManager::new(
+                                    app.clone(),
+                                    audio_manager.clone(),
+                                    terminal_ui_arc.clone(),
                                 );
-
-                                // Process input for settings
-                                loop {
-                                    let input_timeout = Duration::from_millis(16);
-
-                                    if let Some(event) = terminal_ui.poll_events(input_timeout)? {
-                                        if let crossterm::event::Event::Key(key_event) = event {
-                                            // Handle key events for settings
-                                            match key_event.code {
-                                                crossterm::event::KeyCode::Char('1') => {
-                                                    // Create test session
-                                                    terminal_ui.close_text_input();
-
-                                                    let mut app_lock = app.lock().unwrap();
-                                                    if let Ok(session) =
-                                                        app_lock.create_test_session().await
-                                                    {
-                                                        terminal_ui.update_participants(
-                                                            session.participants.clone(),
-                                                        );
-                                                        terminal_ui.set_connection_link(Some(
-                                                            "Test Session".to_string(),
-                                                        ));
-                                                        terminal_ui.update_menu_items(true);
-                                                        terminal_ui.show_notification(
-                                                            "Test session created with 3 simulated participants".to_string(),
-                                                            Duration::from_secs(2),
-                                                        );
-                                                    } else {
-                                                        terminal_ui.show_notification(
-                                                            "Failed to create test session"
-                                                                .to_string(),
-                                                            Duration::from_secs(2),
-                                                        );
-                                                    }
-                                                    break;
-                                                }
-                                                crossterm::event::KeyCode::Char('2')
-                                                | crossterm::event::KeyCode::Esc => {
-                                                    // Cancel
-                                                    terminal_ui.close_text_input();
-                                                    break;
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-
-                                    // Render UI during input
-                                    terminal_ui.render(&app.lock().unwrap())?;
-
-                                    // Check if text input is still active
-                                    if !terminal_ui.is_text_input_active() {
-                                        break;
-                                    }
-                                }
-                            }
-                            ui::MenuAction::TestSession => {
-                                // Directly create a test session
-                                if let Ok(session) = app_lock.create_test_session().await {
-                                    terminal_ui.update_participants(session.participants.clone());
-                                    terminal_ui
-                                        .set_connection_link(Some("Test Session".to_string()));
-                                    terminal_ui.update_menu_items(true);
-                                    terminal_ui.show_notification(
-                                        "Test session created with 3 simulated participants"
-                                            .to_string(),
-                                        Duration::from_secs(2),
-                                    );
-                                }
+                                settings_manager.show_settings_menu().await?;
                             }
                             ui::MenuAction::Quit => break,
+                            ui::MenuAction::SettingsInputDevice => {
+                                // This is handled by SettingsManager
+                            }
+                            ui::MenuAction::SettingsOutputDevice => {
+                                // This is handled by SettingsManager
+                            }
+                            ui::MenuAction::SettingsTestSession => {
+                                // This is handled by SettingsManager
+                            }
+                            ui::MenuAction::SettingsBack => {
+                                // This is handled by TerminalUI
+                            }
+                            ui::MenuAction::DeviceSelect(_) => {
+                                // This is handled by SettingsManager
+                            }
+                            ui::MenuAction::DeviceDefault => {
+                                // This is handled by SettingsManager
+                            }
+                            ui::MenuAction::DeviceBack => {
+                                // This is handled by TerminalUI
+                            }
+                            ui::MenuAction::TestSession => {
+                                // Release app_lock to avoid deadlock
+                                drop(app_lock);
+
+                                let settings_manager = SettingsManager::new(
+                                    app.clone(),
+                                    audio_manager.clone(),
+                                    terminal_ui_arc.clone(),
+                                );
+                                settings_manager.create_test_session().await?;
+                            }
                         }
                     }
                 }
@@ -554,14 +446,22 @@ async fn run_tui_with_audio(
             }
 
             // Render UI
-            terminal_ui.render(&app.lock().unwrap())?;
+            let app_lock = app.lock().unwrap();
+            terminal_ui.render(&app_lock)?;
+            drop(app_lock);
 
             last_tick = std::time::Instant::now();
         }
+
+        // Release the lock at the end of each iteration
+        drop(terminal_ui);
     }
 
     // Shutdown terminal
-    terminal_ui.shutdown()?;
+    {
+        let mut terminal_ui = terminal_ui_arc.lock().unwrap();
+        terminal_ui.shutdown()?;
+    }
 
     Ok(())
 }

@@ -17,7 +17,10 @@ use ratatui::{
 };
 use std::{
     io::{self, stdout},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -51,6 +54,15 @@ pub enum MenuAction {
     Settings,
     TestSession,
     Quit,
+    // Add submenu-specific actions
+    SettingsInputDevice,
+    SettingsOutputDevice,
+    SettingsTestSession,
+    SettingsBack,
+    // Device selection actions
+    DeviceSelect(usize),
+    DeviceDefault,
+    DeviceBack,
 }
 
 /// Represents UI notification state
@@ -75,7 +87,10 @@ pub struct TerminalUI {
     terminal: Option<Terminal<CrosstermBackend<io::Stdout>>>,
     running: Arc<AtomicBool>,
     menu_items: Vec<MenuItem>,
+    original_menu_items: Vec<MenuItem>, // Store original menu items
     menu_state: ListState,
+    menu_level: usize, // Track the current menu level (0 = main, 1 = submenu, etc.)
+    menu_path: Vec<String>, // Track menu navigation path for display
     participants: Arc<Mutex<Vec<Participant>>>,
     audio_visualizer: AudioVisualizationWidget,
     connection_link: Arc<Mutex<Option<String>>>,
@@ -100,7 +115,10 @@ impl TerminalUI {
             terminal: None,
             running: Arc::new(AtomicBool::new(false)),
             menu_items,
+            original_menu_items: Vec::new(), // Initialize empty
             menu_state,
+            menu_level: 0,         // Start at main menu
+            menu_path: Vec::new(), // Start with empty path
             participants: Arc::new(Mutex::new(Vec::new())),
             audio_visualizer: AudioVisualizationWidget::new(),
             connection_link: Arc::new(Mutex::new(None)),
@@ -271,30 +289,41 @@ impl TerminalUI {
 
     /// Handles key events
     pub fn handle_key_event(&mut self, key: KeyCode) -> Option<MenuAction> {
-        // If text input is active, handle that first
+        // First handle text input if active
         if self.text_input.is_some() {
             if self.handle_text_input_key(key) {
                 return None;
             }
         }
 
+        // Handle menu navigation even when text input is active
         match key {
             KeyCode::Up => {
-                // Move menu selection up
+                // Always handle menu movement
                 let current = self.menu_state.selected().unwrap_or(0);
                 if current > 0 {
                     self.menu_state.select(Some(current - 1));
                 }
-                None
+                return None;
             }
             KeyCode::Down => {
-                // Move menu selection down
+                // Always handle menu movement
                 let current = self.menu_state.selected().unwrap_or(0);
                 if current < self.menu_items.len() - 1 {
                     self.menu_state.select(Some(current + 1));
                 }
-                None
+                return None;
             }
+            _ => {}
+        }
+
+        // If we have a text input active, don't process menu actions
+        if self.text_input.is_some() {
+            return None;
+        }
+
+        // Handle menu actions
+        match key {
             KeyCode::Enter => {
                 // Execute selected menu action
                 if let Some(selected) = self.menu_state.selected() {
@@ -340,6 +369,178 @@ impl TerminalUI {
         Ok(None)
     }
 
+    /// Update menu items based on app connection state
+    pub fn update_menu_items(&mut self, is_connected: bool) {
+        let menu_items = if is_connected {
+            vec![
+                MenuItem {
+                    label: "Create Session".to_string(),
+                    action: MenuAction::Create,
+                },
+                MenuItem {
+                    label: "Join Session".to_string(),
+                    action: MenuAction::Join,
+                },
+                MenuItem {
+                    label: "Leave Session".to_string(),
+                    action: MenuAction::Leave,
+                },
+                MenuItem {
+                    label: "Settings".to_string(),
+                    action: MenuAction::Settings,
+                },
+                MenuItem {
+                    label: "Quit".to_string(),
+                    action: MenuAction::Quit,
+                },
+            ]
+        } else {
+            vec![
+                MenuItem {
+                    label: "Create Session".to_string(),
+                    action: MenuAction::Create,
+                },
+                MenuItem {
+                    label: "Join Session".to_string(),
+                    action: MenuAction::Join,
+                },
+                MenuItem {
+                    label: "Settings".to_string(),
+                    action: MenuAction::Settings,
+                },
+                MenuItem {
+                    label: "Quit".to_string(),
+                    action: MenuAction::Quit,
+                },
+            ]
+        };
+
+        // Store the original menu items when updating at level 0
+        if self.menu_level == 0 {
+            self.original_menu_items = menu_items.clone();
+        }
+
+        self.menu_items = menu_items;
+
+        // Reset menu selection to first item
+        if !self.menu_items.is_empty() {
+            self.menu_state.select(Some(0));
+        }
+    }
+
+    /// Show settings submenu
+    pub fn show_settings_menu(&mut self) {
+        // Save current menu level path
+        self.menu_path.push("Settings".to_string());
+        self.menu_level = 1;
+
+        // Create settings menu items
+        let settings_menu = vec![
+            MenuItem {
+                label: "  Input (microphone)".to_string(), // Indented to show submenu
+                action: MenuAction::SettingsInputDevice,
+            },
+            MenuItem {
+                label: "  Output (speaker)".to_string(),
+                action: MenuAction::SettingsOutputDevice,
+            },
+            MenuItem {
+                label: "  Start test session".to_string(),
+                action: MenuAction::SettingsTestSession,
+            },
+            MenuItem {
+                label: "  Back".to_string(),
+                action: MenuAction::SettingsBack,
+            },
+        ];
+
+        // Update menu items
+        self.menu_items = settings_menu;
+
+        // Reset selection to first item
+        if !self.menu_items.is_empty() {
+            self.menu_state.select(Some(0));
+        }
+    }
+
+    /// Show device selection submenu
+    pub fn show_device_menu(
+        &mut self,
+        is_input: bool,
+        devices: &[crate::audio::AudioDevice],
+        current_device: Option<&crate::audio::AudioDevice>,
+    ) {
+        // Save current menu level path
+        self.menu_path.push(
+            if is_input {
+                "Input Devices"
+            } else {
+                "Output Devices"
+            }
+            .to_string(),
+        );
+        self.menu_level = 2;
+
+        // Create device menu items
+        let mut device_menu = vec![MenuItem {
+            label: "    System Default".to_string(), // Double indented for subsubmenu
+            action: MenuAction::DeviceDefault,
+        }];
+
+        // Add all available devices
+        for (i, device) in devices.iter().enumerate() {
+            let is_current = current_device.map_or(false, |d| d.id == device.id);
+            let label = format!(
+                "    {} {}",
+                device.name,
+                if is_current { "(current)" } else { "" }
+            );
+
+            device_menu.push(MenuItem {
+                label,
+                action: MenuAction::DeviceSelect(i),
+            });
+        }
+
+        // Add back option
+        device_menu.push(MenuItem {
+            label: "    Back".to_string(),
+            action: MenuAction::DeviceBack,
+        });
+
+        // Update menu items
+        self.menu_items = device_menu;
+
+        // Reset selection to first item
+        if !self.menu_items.is_empty() {
+            self.menu_state.select(Some(0));
+        }
+    }
+
+    /// Return to previous menu
+    pub fn return_to_previous_menu(&mut self) {
+        if self.menu_level > 0 {
+            // Pop the current menu from path
+            self.menu_path.pop();
+            self.menu_level -= 1;
+
+            if self.menu_level == 0 {
+                // Return to main menu
+                self.menu_items = self.original_menu_items.clone();
+            } else if self.menu_level == 1 {
+                // Return to settings menu
+                self.show_settings_menu();
+                // We need to pop because show_settings_menu pushes to path
+                self.menu_path.pop();
+            }
+
+            // Reset selection to first item
+            if !self.menu_items.is_empty() {
+                self.menu_state.select(Some(0));
+            }
+        }
+    }
+
     /// Renders the UI
     pub fn render(&mut self, _app: &App) -> io::Result<()> {
         // Update notification state
@@ -349,6 +550,7 @@ impl TerminalUI {
             // Create local copies of all the data we need
             let menu_items = self.menu_items.clone();
             let mut menu_state = self.menu_state.clone();
+            let menu_path = self.menu_path.clone(); // Copy path for rendering
             let participants = self.participants.lock().unwrap().clone();
             let connection_link = self.connection_link.lock().unwrap().clone();
             let audio_visualizer = self.audio_visualizer.clone();
@@ -390,8 +592,16 @@ impl TerminalUI {
                     status_bar: vertical_split[1],
                 };
 
-                // Render menu area (top left)
-                let menu_items: Vec<ListItem> = menu_items
+                // Render menu directly instead of using static method
+                // Generate path string if we're in a submenu
+                let title = if menu_path.is_empty() {
+                    "Menu".to_string()
+                } else {
+                    format!("Menu > {}", menu_path.join(" > "))
+                };
+
+                // Create menu widget with items
+                let menu_items_list: Vec<ListItem> = menu_items
                     .iter()
                     .map(|item| {
                         ListItem::new(Line::from(vec![Span::styled(
@@ -401,8 +611,8 @@ impl TerminalUI {
                     })
                     .collect();
 
-                let menu = List::new(menu_items)
-                    .block(Block::default().title("Menu").borders(Borders::ALL))
+                let menu = List::new(menu_items_list)
+                    .block(Block::default().title(title).borders(Borders::ALL))
                     .highlight_style(Style::default().fg(Color::Yellow));
 
                 frame.render_stateful_widget(menu, layout.menu_area, &mut menu_state);
@@ -481,7 +691,7 @@ impl TerminalUI {
                         .block(
                             Block::default()
                                 .borders(Borders::ALL)
-                                .title("Enter Session Link")
+                                .title(input.prompt.clone())
                                 .style(Style::default().bg(Color::Black)),
                         );
 
@@ -499,67 +709,14 @@ impl TerminalUI {
                     }
                 }
             })?;
+
+            // Update our menu state from the local copy
+            self.menu_state = menu_state;
         }
+
         Ok(())
     }
-
-    /// Updates the menu items based on whether there's an active connection
-    pub fn update_menu_items(&mut self, has_active_connection: bool) {
-        if has_active_connection {
-            // In a session menu options
-            self.menu_items = vec![
-                MenuItem {
-                    label: "Leave Session".to_string(),
-                    action: MenuAction::Leave,
-                },
-                MenuItem {
-                    label: "Copy Link".to_string(),
-                    action: MenuAction::CopyLink,
-                },
-                MenuItem {
-                    label: "Settings".to_string(),
-                    action: MenuAction::Settings,
-                },
-                MenuItem {
-                    label: "Quit".to_string(),
-                    action: MenuAction::Quit,
-                },
-            ];
-        } else {
-            // Not in a session menu options
-            self.menu_items = vec![
-                MenuItem {
-                    label: "Create Session".to_string(),
-                    action: MenuAction::Create,
-                },
-                MenuItem {
-                    label: "Join Session".to_string(),
-                    action: MenuAction::Join,
-                },
-                MenuItem {
-                    label: "Settings".to_string(),
-                    action: MenuAction::Settings,
-                },
-                MenuItem {
-                    label: "Quit".to_string(),
-                    action: MenuAction::Quit,
-                },
-            ];
-        }
-
-        // Ensure menu selection is still valid
-        let max_index = self.menu_items.len().saturating_sub(1);
-        if let Some(selected) = self.menu_state.selected() {
-            if selected > max_index {
-                self.menu_state.select(Some(max_index));
-            }
-        } else {
-            self.menu_state.select(Some(0));
-        }
-    }
 }
-
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Run the TUI application
 pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
@@ -636,6 +793,27 @@ pub async fn run_tui(app: Arc<Mutex<App>>) -> io::Result<()> {
                                 // This is handled in main.rs
                             }
                             MenuAction::Quit => break,
+                            MenuAction::SettingsInputDevice => {
+                                // This is handled in main.rs
+                            }
+                            MenuAction::SettingsOutputDevice => {
+                                // This is handled in main.rs
+                            }
+                            MenuAction::SettingsTestSession => {
+                                // This is handled in main.rs
+                            }
+                            MenuAction::SettingsBack => {
+                                terminal_ui.return_to_previous_menu();
+                            }
+                            MenuAction::DeviceSelect(index) => {
+                                // This is handled in main.rs
+                            }
+                            MenuAction::DeviceDefault => {
+                                // This is handled in main.rs
+                            }
+                            MenuAction::DeviceBack => {
+                                terminal_ui.return_to_previous_menu();
+                            }
                         }
                     }
                 }

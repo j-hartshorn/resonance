@@ -1,5 +1,6 @@
 use super::capture::{
-    generate_test_audio_with_echo, generate_test_silence, generate_test_speech, measure_echo_level,
+    generate_test_audio, generate_test_audio_with_echo, generate_test_silence,
+    generate_test_speech, measure_echo_level,
 };
 use std::sync::{Arc, Mutex};
 
@@ -89,14 +90,15 @@ impl VoiceProcessor {
     // In a real implementation we would use the webrtc-audio-processing library
     // But for now we'll use a simpler approach that still works
     fn apply_echo_cancellation(&self, input: Vec<f32>, far_end: &[f32]) -> Vec<f32> {
-        // Basic echo cancellation algorithm:
+        // Improved echo cancellation algorithm:
         // 1. High-pass filter to reduce low-frequency echo
         // 2. Adaptive noise cancellation based on far-end reference
+        // 3. Non-linear processing to suppress residual echo
 
         let mut output = input.clone();
 
         // High-pass filter (simple 1-pole filter)
-        let alpha = 0.95; // Filter coefficient
+        let alpha = 0.97; // Increased filter coefficient for better high-pass filtering
         let mut prev = 0.0;
 
         for i in 0..output.len() {
@@ -104,17 +106,60 @@ impl VoiceProcessor {
             prev = output[i];
         }
 
-        // Simple echo cancellation using scaled subtraction
-        // This is a simplified version - real implementations are more complex
+        // Improved echo cancellation using adaptive subtraction
         if !far_end.is_empty() {
-            let echo_coef = 0.3; // Echo reduction coefficient
+            let echo_coef = 0.5; // Increased echo reduction coefficient
+            let delay = 100; // Estimated delay between far-end and echo in samples
 
             // Use the minimum length of both buffers
             let min_len = std::cmp::min(output.len(), far_end.len());
 
             for i in 0..min_len {
-                // Simple echo reduction by subtracting scaled far-end signal
-                output[i] -= echo_coef * far_end[i];
+                if i >= delay {
+                    // Apply echo cancellation with delay estimation
+                    let far_end_idx = if i >= delay { i - delay } else { 0 };
+                    if far_end_idx < far_end.len() {
+                        // Adaptive echo reduction based on far-end signal energy
+                        let far_end_energy = far_end[far_end_idx].abs();
+                        let adaptive_coef = echo_coef * (0.5 + far_end_energy);
+                        output[i] -= adaptive_coef * far_end[far_end_idx];
+                    }
+                }
+            }
+
+            // Non-linear processing to further reduce residual echo
+            for i in 0..output.len() {
+                // Apply soft noise gate to suppress low-level residual echo
+                if output[i].abs() < 0.05 {
+                    output[i] *= 0.5; // Attenuate low-level signals
+                }
+            }
+        }
+
+        // Apply frequency-selective suppression
+        // This simple approach reduces mid-range frequencies where echo is often strongest
+        if output.len() > 32 {
+            // Simple frequency-selective processing by windowing the signal
+            let window_size = 32;
+            let mut i = 0;
+
+            while i + window_size < output.len() {
+                // Calculate energy in this window
+                let window_energy = output[i..i + window_size]
+                    .iter()
+                    .map(|&sample| sample.powi(2))
+                    .sum::<f32>()
+                    / window_size as f32;
+
+                // Apply stronger suppression to medium-energy windows
+                // (likely to be echo rather than direct speech)
+                if window_energy > 0.01 && window_energy < 0.1 {
+                    for j in i..i + window_size {
+                        output[j] *= 0.7; // Selective attenuation
+                    }
+                }
+
+                i += window_size / 2; // Overlapping windows
             }
         }
 
@@ -128,12 +173,29 @@ mod tests {
 
     #[test]
     fn test_echo_cancellation() {
-        let processor = VoiceProcessor::new();
-        let input = generate_test_audio_with_echo();
-        let processed = processor.process(input.clone());
+        // Create a test signal and its echo version
+        let original = generate_test_audio();
+        let input_with_echo = generate_test_audio_with_echo();
 
-        // Echo level should be reduced
-        assert!(measure_echo_level(&processed) < measure_echo_level(&input));
+        // Create processor with echo cancellation enabled
+        let mut processor = VoiceProcessor::new().with_echo_cancellation(true);
+
+        // Set the far-end reference (needed for echo cancellation to work)
+        processor.set_far_end_audio(&original);
+
+        // Process the audio with echo
+        let processed = processor.process(input_with_echo.clone());
+
+        // Calculate echo levels
+        let input_echo_level = measure_echo_level(&input_with_echo);
+        let processed_echo_level = measure_echo_level(&processed);
+
+        // Debug output to see the values
+        println!("Original echo level: {}", input_echo_level);
+        println!("Processed echo level: {}", processed_echo_level);
+
+        // Echo level should be reduced - the processed signal should have less echo
+        assert!(processed_echo_level < input_echo_level);
     }
 
     #[test]

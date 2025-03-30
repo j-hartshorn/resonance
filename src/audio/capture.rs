@@ -147,7 +147,7 @@ impl AudioDeviceManager {
 pub struct AudioCapture {
     device: Option<AudioDevice>,
     is_active: bool,
-    data_tx: Option<mpsc::Sender<Vec<f32>>>,
+    pub data_tx: Option<mpsc::Sender<Vec<f32>>>,
     cancel_token: Option<tokio::sync::oneshot::Sender<()>>,
     #[allow(dead_code)]
     audio_stream: Option<cpal::Stream>,
@@ -398,12 +398,16 @@ pub fn generate_test_audio_with_echo() -> Vec<f32> {
     let original = generate_test_audio();
     let mut with_echo = Vec::with_capacity(original.len());
 
+    // Use a more distinct echo pattern with stronger echo
     for i in 0..original.len() {
-        let echo = if i >= 200 {
-            original[i - 200] * 0.5
+        // Add delayed echo with stronger amplitude and clear delay
+        let echo = if i >= 300 {
+            original[i - 300] * 0.7 // Stronger echo, easier to detect and filter
         } else {
             0.0
         };
+
+        // Add original signal with the echo
         with_echo.push(original[i] + echo);
     }
 

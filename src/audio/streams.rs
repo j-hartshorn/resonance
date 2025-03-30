@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
+use crate::audio::capture::{AudioDevice, AudioDeviceManager};
 use crate::audio::{AudioCapture, SpatialAudioProcessor, VoiceProcessor};
 use crate::network::WebRtcManager;
 use crate::ui::Participant;
@@ -30,6 +31,9 @@ pub struct AudioStreamManager {
 
     // Sample rate for audio processing
     sample_rate: u32,
+
+    // Audio device management
+    device_manager: Arc<Mutex<AudioDeviceManager>>,
 }
 
 /// Represents an active audio stream
@@ -85,6 +89,7 @@ impl AudioStreamManager {
             raw_capture_data: Arc::new(Mutex::new(Vec::new())),
             active: false,
             sample_rate: 48000,
+            device_manager: Arc::new(Mutex::new(AudioDeviceManager::new())),
         }
     }
 
@@ -376,6 +381,90 @@ impl AudioStreamManager {
 
         Ok(())
     }
+
+    /// Gets all available audio devices (both input and output)
+    pub fn get_audio_devices(&self) -> Vec<AudioDevice> {
+        AudioDeviceManager::enumerate_devices()
+    }
+
+    /// Gets all available input devices
+    pub fn get_input_devices(&self) -> Vec<AudioDevice> {
+        self.get_audio_devices()
+            .into_iter()
+            .filter(|d| d.is_input)
+            .collect()
+    }
+
+    /// Gets all available output devices
+    pub fn get_output_devices(&self) -> Vec<AudioDevice> {
+        self.get_audio_devices()
+            .into_iter()
+            .filter(|d| !d.is_input)
+            .collect()
+    }
+
+    /// Get the current input device, if any
+    pub fn current_input_device(&self) -> Option<AudioDevice> {
+        let device_manager = self.device_manager.lock().unwrap();
+        device_manager.current_input_device().cloned()
+    }
+
+    /// Get the current output device, if any
+    pub fn current_output_device(&self) -> Option<AudioDevice> {
+        let device_manager = self.device_manager.lock().unwrap();
+        device_manager.current_output_device().cloned()
+    }
+
+    /// Sets the input device to use for audio capture
+    pub async fn set_input_device(&mut self, device: AudioDevice) -> Result<()> {
+        // Store in device manager
+        {
+            let mut device_manager = self.device_manager.lock().unwrap();
+            device_manager.select_input_device(&device)?;
+        }
+
+        // If we have an active capture, we need to restart it with the new device
+        if let Some(mut capture) = self.capture.take() {
+            // Stop the current capture
+            capture.stop().await?;
+
+            // Create new capture with the selected device
+            let mut new_capture = AudioCapture::new();
+            new_capture.set_device(device.clone())?;
+
+            // Set up the processing pipeline - reuse the current callback logic
+            if let Some(ref tx) = capture.data_tx() {
+                // Clone the channel sender for the new capture
+                let tx_clone = tx.clone();
+                new_capture.set_data_callback(move |data| {
+                    let _ = tx_clone.try_send(data.clone());
+                });
+            }
+
+            // Start the new capture
+            new_capture.start().await?;
+
+            // Replace the old capture
+            self.capture = Some(new_capture);
+        }
+
+        Ok(())
+    }
+
+    /// Sets the output device to use for audio playback
+    pub fn set_output_device(&mut self, device: AudioDevice) -> Result<()> {
+        // Store in device manager
+        let mut device_manager = self.device_manager.lock().unwrap();
+        device_manager.select_output_device(&device)?;
+
+        // In a real implementation, you would need to:
+        // 1. Close existing output streams
+        // 2. Create new output streams with the selected device
+        // 3. Update any spatial audio processors
+
+        // For now, we'll just update the device manager
+        Ok(())
+    }
 }
 
 impl Drop for AudioStreamManager {
@@ -495,5 +584,13 @@ mod tests {
 
         // Clean up
         manager.stop_all_streams().await.unwrap();
+    }
+}
+
+// Add accessor for data_tx to AudioCapture
+impl AudioCapture {
+    /// Get a reference to the data transmitter, if any
+    pub fn data_tx(&self) -> &Option<mpsc::Sender<Vec<f32>>> {
+        &self.data_tx
     }
 }
