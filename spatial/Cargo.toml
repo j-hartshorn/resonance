@@ -1,0 +1,17 @@
+[package]
+name = "spatial"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+tokio = { workspace = true }
+audionimbus = "0.3.0"                 # Added from original root Cargo.toml
+steam-audio-sys = { version = "0.3" } # Added from original root Cargo.toml
+log = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+tokio-test = { workspace = true }
+test-log = { workspace = true }

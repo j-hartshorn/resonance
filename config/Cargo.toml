@@ -1,0 +1,18 @@
+[package]
+name = "config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+serde = { workspace = true }
+tokio = { workspace = true } # May not be strictly needed here
+log = { workspace = true }
+anyhow = { workspace = true }
+config = { version = "0.14", features = [
+    "toml",
+] } # Added for config file handling
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+test-log = { workspace = true }

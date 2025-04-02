@@ -1,0 +1,26 @@
+[package]
+name = "crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+tokio = { workspace = true } # For async traits if needed, unlikely
+log = { workspace = true }
+serde = { workspace = true } # Keys might be serializable
+rand = "0.8"                 # For key generation
+bytes = { workspace = true } # Crypto operations often use byte slices
+# TODO: Add specific crypto dependencies when implementing Phase 2
+# Example dependencies (choose appropriate ones):
+# ring = "0.17"
+# hkdf = "0.12"
+# chacha20poly1305 = "0.10"
+# hmac = "0.12"
+# sha2 = "0.10"
+# x25519-dalek = "2.0"
+# aes-gcm = "0.10"
+
+[dev-dependencies]
+mockall = { workspace = true }
+tokio-test = { workspace = true }
+test-log = { workspace = true }

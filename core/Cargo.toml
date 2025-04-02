@@ -1,0 +1,16 @@
+[package]
+name = "core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true } # Although core, might need types like Duration
+serde = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+uuid = { version = "1", features = [
+    "v4",
+    "serde",
+] } # Added from original root, enabled serde
+bytes = "1" # Often useful for network/serialization related types
+anyhow = { workspace = true } # Added for the Error::Other variant

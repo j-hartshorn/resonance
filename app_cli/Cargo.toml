@@ -1,0 +1,23 @@
+[package]
+name = "app_cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+config = { path = "../config" }
+network = { path = "../network" }
+room = { path = "../room" }
+visualization = { path = "../visualization" }
+audio = { path = "../audio" }
+tokio = { workspace = true }
+ratatui = "0.26"
+log = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+env_logger = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+tokio-test = { workspace = true }
+test-log = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "audio_io"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+tokio = { workspace = true }
+cpal = "0.15"                 # Added from original root Cargo.toml
+log = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }    # Might need mocking for cpal
+tokio-test = { workspace = true }
+test-log = { workspace = true }

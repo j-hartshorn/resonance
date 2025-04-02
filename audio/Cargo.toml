@@ -1,0 +1,17 @@
+[package]
+name = "audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core = { path = "../core" }
+audio_io = { path = "../audio_io" }
+spatial = { path = "../spatial" }
+tokio = { workspace = true }
+log = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+tokio-test = { workspace = true }
+test-log = { workspace = true }
