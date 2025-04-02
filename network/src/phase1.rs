@@ -1,9 +1,8 @@
-use crate::events::NetworkEvent;
 use crate::protocol::{self, PeerInfo, Phase1Message, PROTOCOL_VERSION};
 use bincode;
 use crypto::CryptoProvider;
 use log::{debug, error, info, trace, warn};
-use room_core::{Error, PeerId, RoomId};
+use room_core::{Error, NetworkCommand, NetworkEvent, NetworkMessage, PeerId, RoomId};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -876,9 +875,12 @@ impl Phase1Network {
                                                             let event =
                                                                 NetworkEvent::MessageReceived {
                                                                     peer_id: connection_peer_id,
-                                                                    message: Phase1Message::Ping {
-                                                                        peer_id: pinging_peer,
-                                                                    }, // Reconstruct Ping
+                                                                    message: NetworkMessage::Text(
+                                                                        format!(
+                                                                            "Ping from {}",
+                                                                            pinging_peer
+                                                                        ),
+                                                                    ),
                                                                 };
                                                             event_sender.send(event).await.map_err(|e| Error::Network(format!("Failed to send Ping MessageReceived event: {}", e)))?;
                                                             info!("Sent MessageReceived event for Ping from {}", pinging_peer);
@@ -919,9 +921,12 @@ impl Phase1Network {
                                                             let event =
                                                                 NetworkEvent::MessageReceived {
                                                                     peer_id: connection_peer_id, // ID of the peer who sent the encrypted message
-                                                                    message: Phase1Message::Pong {
-                                                                        peer_id: ponging_peer,
-                                                                    }, // Reconstruct the Pong message
+                                                                    message: NetworkMessage::Text(
+                                                                        format!(
+                                                                            "Pong from {}",
+                                                                            ponging_peer
+                                                                        ),
+                                                                    ),
                                                                 };
                                                             event_sender.send(event).await.map_err(|e| Error::Network(format!("Failed to send Pong MessageReceived event: {}", e)))?;
                                                             info!("Sent MessageReceived event for Pong from {}", ponging_peer);
@@ -935,7 +940,10 @@ impl Phase1Network {
                                                         );
                                                         let event = NetworkEvent::MessageReceived {
                                                             peer_id: connection_peer_id,
-                                                            message: inner_message,
+                                                            message: NetworkMessage::Binary(
+                                                                bincode::serialize(&inner_message)
+                                                                    .unwrap_or_default(),
+                                                            ),
                                                         };
                                                         event_sender.send(event).await.map_err(|e| Error::Network(format!("Failed to send MessageReceived event: {}", e)))?;
                                                     }
@@ -1098,6 +1106,33 @@ impl Phase1Network {
         }
 
         Ok(())
+    }
+
+    /// Get a sender for commands to the phase 1 network
+    pub fn get_command_sender(&self) -> mpsc::Sender<NetworkCommand> {
+        // Create a new channel
+        let (tx, mut rx) = mpsc::channel(100);
+
+        // Clone senders we'll need in the task
+        let socket_sender = self.event_sender.clone();
+
+        // Spawn a task to process commands
+        tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    // Process commands as appropriate
+                    // This is a stub for now - in a real implementation,
+                    // we would convert these high-level commands to specific
+                    // network operations using the socket_sender
+                    _ => {
+                        // For now, just log that we received a command
+                        debug!("Received command: {:?}", command);
+                    }
+                }
+            }
+        });
+
+        tx
     }
 }
 

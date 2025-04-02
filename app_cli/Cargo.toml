@@ -4,21 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+crossterm = "0.27"
+env_logger = "0.10"
+log = "0.4"
+ratatui = "0.24"
 room_core = { path = "../room_core" }
 settings_manager = { path = "../settings_manager" }
-network = { path = "../network" }
+tokio = { version = "1.35", features = ["full"] }
 room = { path = "../room" }
-visualization = { path = "../visualization" }
-audio = { path = "../audio" }
-tokio = { workspace = true }
-ratatui = "0.26"
-crossterm = "0.27"
-log = { workspace = true }
-anyhow = { workspace = true }
-clap = { version = "4", features = ["derive"] }
-env_logger = { workspace = true }
+network = { path = "../network" }
+uuid = { version = "1.6", features = ["v4", "serde"] }
 
 [dev-dependencies]
-mockall = { workspace = true }
-tokio-test = { workspace = true }
-test-log = { workspace = true }
+mockall = "0.11"

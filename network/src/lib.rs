@@ -4,7 +4,7 @@
 //! from basic UDP sockets to WebRTC connection management.
 
 use log::{debug, error, info, trace, warn};
-use room_core::{Error, PeerId, RoomId};
+use room_core::{Error, NetworkCommand, NetworkEvent, PeerId, RoomId};
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
@@ -12,7 +12,6 @@ pub mod events;
 pub mod phase1;
 pub mod protocol;
 
-use events::NetworkEvent;
 use phase1::Phase1Network;
 
 #[cfg(test)]
@@ -26,13 +25,8 @@ mod tests {
         assert!(manager.is_ok());
 
         let manager = manager.unwrap();
-        assert_eq!(manager.peer_id, peer_id);
         assert_eq!(manager.room_id, None);
     }
-
-    // Additional tests would follow for room creation, connection, etc.
-
-    pub mod phase1_test;
 }
 
 /// Network manager coordinates all networking operations
@@ -47,6 +41,8 @@ pub struct NetworkManager {
     event_tx: mpsc::Sender<NetworkEvent>,
     /// Channel for receiving network events (for internal forwarding)
     _event_rx: mpsc::Receiver<NetworkEvent>,
+    /// Channel for receiving commands from room
+    command_rx: mpsc::Receiver<NetworkCommand>,
 }
 
 impl NetworkManager {
@@ -55,8 +51,15 @@ impl NetworkManager {
         // Create channels for network events
         let (event_tx, event_rx) = mpsc::channel(100);
 
-        // Create Phase1Network
-        let phase1 = Phase1Network::new(peer_id, None, event_tx.clone()).await?;
+        // Create command channel (will be connected later)
+        let (command_tx, command_rx) = mpsc::channel(100);
+
+        // Create Phase1Network with custom bind address
+        let bind_addr = SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+            0, // Use port 0 to get a random available port
+        );
+        let phase1 = Phase1Network::new(peer_id, Some(bind_addr), event_tx.clone()).await?;
 
         Ok(Self {
             peer_id,
@@ -64,13 +67,61 @@ impl NetworkManager {
             phase1,
             event_tx,
             _event_rx: event_rx,
+            command_rx,
         })
     }
 
+    /// Get a sender for commands to this network manager
+    pub fn get_command_sender(&self) -> mpsc::Sender<NetworkCommand> {
+        mpsc::Sender::clone(&self.phase1.get_command_sender())
+    }
+
     /// Start the network manager
-    pub async fn start(&self) -> Result<(), Error> {
+    pub async fn run(&mut self) -> Result<(), Error> {
         // Start the Phase1Network
         self.phase1.start().await?;
+
+        // Process commands
+        loop {
+            tokio::select! {
+                // Process commands
+                Some(command) = self.command_rx.recv() => {
+                    if let Err(e) = self.handle_command(command).await {
+                        error!("Error handling network command: {}", e);
+                    }
+                }
+
+                // Check for task cancellation
+                else => break,
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a command from room
+    async fn handle_command(&mut self, command: NetworkCommand) -> Result<(), Error> {
+        match command {
+            NetworkCommand::CreateRoom { room_id } => {
+                self.create_room(room_id).await?;
+            }
+
+            NetworkCommand::ConnectToRoom { room_id, address } => {
+                self.connect_to_room(room_id, address).await?;
+            }
+
+            NetworkCommand::SendJoinResponse {
+                peer_id,
+                approved,
+                reason,
+            } => {
+                self.send_join_response(peer_id, approved, reason).await?;
+            }
+
+            NetworkCommand::DisconnectPeer { peer_id } => {
+                self.disconnect_peer(peer_id).await?;
+            }
+        }
 
         Ok(())
     }

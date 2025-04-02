@@ -4,30 +4,12 @@
 //! join requests, and other stateful room operations.
 
 use log::{debug, info};
-use room_core::{Error, PeerId, RoomId};
+use room_core::{Error, JoinRequestStatus, PeerId, RoomEvent, RoomId};
 use std::collections::HashMap;
 use std::fmt;
 
 /// Maximum number of users allowed in a room
 pub const MAX_USERS: usize = 8;
-
-/// Status of a join request
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JoinRequestStatus {
-    Pending,
-    Approved,
-    Denied,
-}
-
-impl fmt::Display for JoinRequestStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            JoinRequestStatus::Pending => write!(f, "Pending"),
-            JoinRequestStatus::Approved => write!(f, "Approved"),
-            JoinRequestStatus::Denied => write!(f, "Denied"),
-        }
-    }
-}
 
 /// Information about a peer in the room
 #[derive(Debug, Clone)]
@@ -38,21 +20,6 @@ pub struct PeerInfo {
     pub name: String,
     /// When the peer joined the room (as system time)
     pub joined_at: std::time::SystemTime,
-}
-
-/// Room event that can be sent to subscribers
-#[derive(Debug, Clone, PartialEq)]
-pub enum RoomEvent {
-    /// A peer has been added to the room
-    PeerAdded(PeerId),
-    /// A peer has been removed from the room
-    PeerRemoved(PeerId),
-    /// A join request has been received
-    JoinRequestReceived(PeerId),
-    /// A join request status has changed
-    JoinRequestStatusChanged(PeerId, JoinRequestStatus),
-    /// The peer list has been updated
-    PeerListUpdated,
 }
 
 /// Room state container
@@ -544,3 +511,7 @@ mod tests {
         assert_eq!(format!("{}", JoinRequestStatus::Denied), "Denied");
     }
 }
+
+// Add module declarations
+pub mod commands;
+pub mod handler;

@@ -5,8 +5,9 @@ edition = "2021"
 
 [dependencies]
 room_core = { path = "../room_core" }
-tokio = { workspace = true }
-log = { workspace = true }
+log = "0.4"
+tokio = { version = "1.35", features = ["full", "sync"] }
+network = { path = "../network" }
 serde = { workspace = true }
 
 [dev-dependencies]

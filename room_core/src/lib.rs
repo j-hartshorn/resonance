@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std;
+use std::net::SocketAddr;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -33,6 +34,11 @@ pub struct RoomId(Uuid);
 impl RoomId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Create a RoomId from a UUID
+    pub fn from(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 }
 
@@ -92,6 +98,83 @@ pub const CHANNELS: u16 = 1; // Start with Mono
 /// Represents a buffer of audio samples.
 /// Samples are typically f32.
 pub type AudioBuffer = Vec<f32>;
+
+/// Commands that can be sent to the room handler
+#[derive(Debug, Clone)]
+pub enum RoomCommand {
+    /// Create a new room
+    CreateRoom,
+
+    /// Join a room via link
+    JoinRoom {
+        /// Room ID to join
+        room_id: RoomId,
+        /// Host address to connect to
+        address: SocketAddr,
+    },
+
+    /// Approve a join request
+    ApproveJoinRequest {
+        /// ID of the peer to approve
+        peer_id: PeerId,
+    },
+
+    /// Deny a join request
+    DenyJoinRequest {
+        /// ID of the peer to deny
+        peer_id: PeerId,
+        /// Optional reason for denial
+        reason: Option<String>,
+    },
+
+    /// Disconnect from the room
+    LeaveRoom,
+
+    /// Request the current state of the room
+    RequestState,
+
+    /// Shutdown the handler (used for testing)
+    Shutdown,
+}
+
+/// Commands that room sends to network
+#[derive(Debug, Clone)]
+pub enum NetworkCommand {
+    /// Create a new room
+    CreateRoom {
+        /// Room ID to create
+        room_id: RoomId,
+    },
+
+    /// Connect to an existing room
+    ConnectToRoom {
+        /// Room ID to connect to
+        room_id: RoomId,
+        /// Address to connect to
+        address: SocketAddr,
+    },
+
+    /// Send a join response to a peer
+    SendJoinResponse {
+        /// ID of the peer to send response to
+        peer_id: PeerId,
+        /// Whether the join was approved
+        approved: bool,
+        /// Optional reason for rejection
+        reason: Option<String>,
+    },
+
+    /// Disconnect from a peer
+    DisconnectPeer {
+        /// ID of the peer to disconnect from
+        peer_id: PeerId,
+    },
+}
+
+pub mod events;
+
+// Re-export commonly used types from events
+pub use events::{JoinRequestStatus, NetworkEvent, NetworkMessage, RoomEvent};
 
 #[cfg(test)]
 mod tests {
