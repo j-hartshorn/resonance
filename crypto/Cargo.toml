@@ -21,3 +21,4 @@ thiserror = "1.0"                     # For error enums
 mockall = { workspace = true }
 tokio-test = { workspace = true }
 test-log = { workspace = true }
+hex-literal = "0.4"

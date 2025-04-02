@@ -16,6 +16,9 @@ use sha2::Sha256;
 use std::convert::TryInto;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
+#[cfg(test)]
+use hex_literal::hex;
+
 /// The size of the nonce for ChaCha20Poly1305 in bytes
 pub const NONCE_SIZE: usize = 12;
 /// The size of the Diffie-Hellman public key in bytes
@@ -253,8 +256,10 @@ mod tests {
         let (private_key2, public_key2) = CryptoProvider::generate_dh_keypair();
 
         // Compute shared secrets from both sides
-        let shared_secret1 = CryptoProvider::compute_shared_secret(private_key, &public_key2);
-        let shared_secret2 = CryptoProvider::compute_shared_secret(private_key2, &public_key);
+        let public_key_copy = public_key.clone();
+        let public_key2_copy = public_key2.clone();
+        let shared_secret1 = CryptoProvider::compute_shared_secret(private_key, &public_key2_copy);
+        let shared_secret2 = CryptoProvider::compute_shared_secret(private_key2, &public_key_copy);
 
         // Both sides should compute the same shared secret
         assert_eq!(shared_secret1, shared_secret2);
@@ -262,51 +267,67 @@ mod tests {
 
     #[test]
     fn test_key_derivation() {
+        // Test 1: Basic derivation
         let shared_secret = [1u8; 32];
         let link_key = b"room_link_key";
-        let info = b"encryption";
+        let info_enc = b"encryption";
+        let info_hmac = b"hmac";
 
-        let derived_key = CryptoProvider::derive_key(&shared_secret, link_key, info, 32).unwrap();
+        let derived_key_enc =
+            CryptoProvider::derive_key(&shared_secret, link_key, info_enc, 32).unwrap();
+        assert_eq!(derived_key_enc.len(), 32);
 
-        assert_eq!(derived_key.len(), 32);
+        let derived_key_hmac =
+            CryptoProvider::derive_key(&shared_secret, link_key, info_hmac, 32).unwrap();
+        assert_ne!(derived_key_enc, derived_key_hmac);
 
-        // Test with different info produces different key
-        let derived_key2 =
-            CryptoProvider::derive_key(&shared_secret, link_key, b"hmac", 32).unwrap();
+        // Test 2: Known Vector from RFC 5869 (Test Case 1)
+        // IKM = 0x0b...0b (22 bytes)
+        // salt = 0x00...0c (13 bytes)
+        // info = 0xf0...f9 (10 bytes)
+        // L = 32 (simplified from 42)
+        // Expected OKM (first 32 bytes of the 42 bytes in RFC):
+        // 0x3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf
+        let ikm = [0x0bu8; 22];
+        let salt = hex!("000102030405060708090a0b0c");
+        let info = hex!("f0f1f2f3f4f5f6f7f8f9"); // Corrected: 10 bytes
+        let expected_okm_32 =
+            hex!("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf");
 
-        assert_ne!(derived_key, derived_key2);
+        let derived_key_rfc = CryptoProvider::derive_key(&ikm, &salt, &info, 32).unwrap();
+        assert_eq!(
+            derived_key_rfc, expected_okm_32,
+            "RFC5869 Test Case 1 Failed"
+        );
     }
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let key = [7u8; 32]; // Just for testing
+        let key = [7u8; 32];
         let plaintext = b"secret message";
         let associated_data = b"additional data";
 
         let ciphertext = CryptoProvider::encrypt(&key, plaintext, associated_data).unwrap();
 
-        // Verify the ciphertext is longer than plaintext + nonce due to auth tag
         assert!(ciphertext.len() > plaintext.len() + NONCE_SIZE);
 
-        // Decrypt the message
         let decrypted = CryptoProvider::decrypt(&key, &ciphertext, associated_data).unwrap();
-
-        // Verify decrypted text matches original
         assert_eq!(decrypted, plaintext);
 
-        // Test tampering detection - modify the ciphertext
-        let mut tampered = ciphertext.clone();
-        if tampered.len() > NONCE_SIZE + 1 {
-            tampered[NONCE_SIZE + 1] ^= 1; // Flip a bit in the ciphertext (not the nonce)
-
-            // Decryption should fail
-            assert!(CryptoProvider::decrypt(&key, &tampered, associated_data).is_err());
+        let mut tampered_ct = ciphertext.clone();
+        if tampered_ct.len() > NONCE_SIZE + 1 {
+            tampered_ct[NONCE_SIZE + 1] ^= 1;
+            assert!(CryptoProvider::decrypt(&key, &tampered_ct, associated_data).is_err());
         }
 
-        // Test associated data validation - temporarily remove this test as our implementation
-        // doesn't use associated data yet (we'll need to update this API in a future phase)
-        // let wrong_ad = b"wrong data";
-        // assert!(CryptoProvider::decrypt(&key, &ciphertext, wrong_ad).is_err());
+        let mut tampered_nonce = ciphertext.clone();
+        if !tampered_nonce.is_empty() {
+            tampered_nonce[0] ^= 1;
+            assert!(CryptoProvider::decrypt(&key, &tampered_nonce, associated_data).is_err());
+        }
+
+        let wrong_key = [8u8; 32];
+        assert!(CryptoProvider::decrypt(&wrong_key, &ciphertext, associated_data).is_err());
     }
 
     #[test]
@@ -315,17 +336,25 @@ mod tests {
         let message = b"message to authenticate";
 
         let hmac_tag = CryptoProvider::hmac(key, message).unwrap();
+        assert_eq!(hmac_tag.len(), HMAC_SIZE);
 
-        // Verify tag
         assert!(CryptoProvider::verify_hmac(key, message, &hmac_tag).is_ok());
 
-        // Test modified message
-        let modified = b"modified message";
-        assert!(CryptoProvider::verify_hmac(key, modified, &hmac_tag).is_err());
+        let modified_msg = b"modified message";
+        assert!(CryptoProvider::verify_hmac(key, modified_msg, &hmac_tag).is_err());
 
-        // Test modified tag
         let mut modified_tag = hmac_tag;
         modified_tag[0] ^= 1;
         assert!(CryptoProvider::verify_hmac(key, message, &modified_tag).is_err());
+
+        let key_rfc = [0x0bu8; 20];
+        let data_rfc = b"Hi There";
+        let expected_hmac_rfc =
+            hex!("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+
+        let computed_hmac_rfc = CryptoProvider::hmac(&key_rfc, data_rfc).unwrap();
+        assert_eq!(computed_hmac_rfc, expected_hmac_rfc);
+
+        assert!(CryptoProvider::verify_hmac(&key_rfc, data_rfc, &expected_hmac_rfc).is_ok());
     }
 }
