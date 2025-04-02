@@ -63,6 +63,12 @@ pub enum NetworkEvent {
         reason: String,
     },
 
+    /// Authentication with a peer succeeded
+    AuthenticationSucceeded {
+        /// ID of the authenticated peer
+        peer_id: PeerId,
+    },
+
     /// A network error occurred
     Error {
         /// The error message

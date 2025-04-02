@@ -1,5 +1,6 @@
 use crate::events::NetworkEvent;
 use crate::protocol::{self, PeerInfo, Phase1Message, PROTOCOL_VERSION};
+use bincode;
 use crypto::CryptoProvider;
 use log::{debug, error, info, trace, warn};
 use room_core::{Error, PeerId, RoomId};
@@ -9,7 +10,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::{self, Duration};
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use x25519_dalek::{EphemeralSecret, PublicKey}; // Ensure bincode is imported if used directly
 
 /// Default port for Phase 1 connections
 pub const DEFAULT_PORT: u16 = 12345;
@@ -86,6 +87,8 @@ struct PeerConnection {
     decryption_key: Option<Vec<u8>>,
     /// HMAC key for authenticating messages
     hmac_key: Option<Vec<u8>>,
+    /// Our own public key used in the DH exchange for this peer
+    our_public_key: Option<PublicKey>,
     /// Last time we received a message from this peer
     last_received: std::time::Instant,
 }
@@ -106,6 +109,7 @@ impl PeerConnection {
             encryption_key: None,
             decryption_key: None,
             hmac_key: None,
+            our_public_key: None,
             last_received: std::time::Instant::now(),
         }
     }
@@ -192,6 +196,8 @@ impl Phase1Network {
         let peers = self.peers.clone();
         let peer_addresses = self.peer_addresses.clone();
         let event_sender = self.event_sender.clone();
+        let self_peer_id = self.peer_id;
+        let network_state = Arc::new(RwLock::new((self.room_id, self.is_server)));
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; protocol::MAX_UDP_PAYLOAD_SIZE];
@@ -200,20 +206,20 @@ impl Phase1Network {
                 match socket.recv_from(&mut buf).await {
                     Ok((len, addr)) => {
                         let message_bytes = &buf[..len];
-
-                        // Process the received message
                         match protocol::deserialize(message_bytes) {
                             Ok(message) => {
-                                let peer_id = {
+                                let incoming_peer_id_opt = {
                                     let addresses = peer_addresses.read().await;
                                     addresses.get(&addr).cloned()
                                 };
-
-                                // Handle the message
-                                if let Err(e) = Self::handle_message(
+                                let (room_id, is_server) = *network_state.read().await;
+                                if let Err(e) = Phase1Network::handle_message(
                                     message,
                                     addr,
-                                    peer_id,
+                                    incoming_peer_id_opt,
+                                    self_peer_id,
+                                    room_id,
+                                    is_server,
                                     &peers,
                                     &peer_addresses,
                                     &event_sender,
@@ -231,7 +237,6 @@ impl Phase1Network {
                     }
                     Err(e) => {
                         error!("Error receiving from socket: {}", e);
-                        // Short delay to prevent tight loop on persistent errors
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
@@ -316,11 +321,14 @@ impl Phase1Network {
         Ok(())
     }
 
-    /// Handle a received message
+    /// Handle a received message (Static method version)
     async fn handle_message(
         message: Phase1Message,
         addr: SocketAddr,
-        peer_id: Option<PeerId>,
+        incoming_peer_id_opt: Option<PeerId>,
+        self_peer_id: PeerId,
+        current_room_id: Option<RoomId>,
+        is_server: bool,
         peers: &Arc<RwLock<HashMap<PeerId, PeerConnection>>>,
         peer_addresses: &Arc<RwLock<HashMap<SocketAddr, PeerId>>>,
         event_sender: &mpsc::Sender<NetworkEvent>,
@@ -330,7 +338,7 @@ impl Phase1Network {
             Phase1Message::HelloInitiate {
                 version,
                 room_id,
-                peer_id,
+                peer_id: initiating_peer_id,
             } => {
                 if version != PROTOCOL_VERSION {
                     warn!(
@@ -340,70 +348,64 @@ impl Phase1Network {
                     return Ok(());
                 }
 
-                // Add the new peer to our maps
+                // We are the server in this case (assuming this message is only processed by the server)
+                // The `is_server` flag should be set by `create_room` on the instance.
+
+                let server_peer_id = self_peer_id;
+
+                // Add the new peer
                 let mut peers_lock = peers.write().await;
                 let mut addresses_lock = peer_addresses.write().await;
 
-                let mut peer_conn = PeerConnection::new(peer_id, addr);
+                let mut peer_conn = PeerConnection::new(initiating_peer_id, addr);
                 peer_conn.state = ConnectionState::HelloExchanged;
-                peer_conn.update_received_time();
 
-                peers_lock.insert(peer_id, peer_conn);
-                addresses_lock.insert(addr, peer_id);
+                let (server_private_key, server_public_key) = CryptoProvider::generate_dh_keypair();
+                peer_conn.our_public_key = Some(server_public_key);
+                peer_conn.private_key = Some(DebugEphemeralSecret(server_private_key));
+
+                peers_lock.insert(initiating_peer_id, peer_conn);
+                addresses_lock.insert(addr, initiating_peer_id);
+
+                // Release locks before sending event and subsequent messages
+                drop(peers_lock);
+                drop(addresses_lock);
+
+                // Send event AFTER releasing locks
+                let event = NetworkEvent::PeerConnected {
+                    peer_id: initiating_peer_id,
+                    address: addr,
+                };
+                event_sender.send(event).await.map_err(|e| {
+                    Error::Network(format!("Failed to send PeerConnected event: {}", e))
+                })?;
 
                 // Send HelloAck
                 let hello_ack = Phase1Message::HelloAck {
                     version: PROTOCOL_VERSION,
                     room_id,
-                    peer_id: peer_id, // The server's peer ID
+                    peer_id: server_peer_id,
                 };
+                let bytes = protocol::serialize(&hello_ack)?;
+                socket.send_to(&bytes, addr).await?;
 
-                let bytes = protocol::serialize(&hello_ack).map_err(|e| {
-                    Error::Serialization(format!("Failed to serialize HelloAck: {}", e))
-                })?;
-
-                socket
-                    .send_to(&bytes, addr)
-                    .await
-                    .map_err(|e| Error::Network(format!("Failed to send HelloAck: {}", e)))?;
-
-                // Generate DH keypair and send public key
-                let (private_key, public_key) = CryptoProvider::generate_dh_keypair();
+                // Send *our* (server's) DH public key
                 let dh_message = Phase1Message::DHPubKey {
-                    pub_key: public_key.to_bytes(),
+                    pub_key: server_public_key.to_bytes(),
                 };
+                let bytes = protocol::serialize(&dh_message)?;
+                socket.send_to(&bytes, addr).await?;
 
-                let bytes = protocol::serialize(&dh_message).map_err(|e| {
-                    Error::Serialization(format!("Failed to serialize DHPubKey: {}", e))
-                })?;
-
-                socket
-                    .send_to(&bytes, addr)
-                    .await
-                    .map_err(|e| Error::Network(format!("Failed to send DHPubKey: {}", e)))?;
-
-                // Update the peer's state
-                if let Some(peer_conn) = peers_lock.get_mut(&peer_id) {
-                    peer_conn.private_key = Some(DebugEphemeralSecret(private_key));
-                    peer_conn.state = ConnectionState::KeyExchanged;
-                }
-
-                // Notify about the new peer
-                let event = NetworkEvent::PeerConnected {
-                    peer_id,
-                    address: addr,
-                };
-
-                event_sender
-                    .send(event)
-                    .await
-                    .map_err(|e| Error::Network(format!("Failed to send event: {}", e)))?;
+                info!(
+                    "Processed HelloInitiate from {}, sent HelloAck & DHPubKey",
+                    initiating_peer_id
+                );
             }
 
             Phase1Message::HelloAck {
                 version,
                 room_id,
-                peer_id,
+                peer_id: acking_peer_id,
             } => {
                 if version != PROTOCOL_VERSION {
                     warn!(
@@ -413,222 +415,308 @@ impl Phase1Network {
                     return Ok(());
                 }
 
-                // Add the peer to our maps
+                let client_peer_id = self_peer_id;
+
+                // Store the peer (server)
                 let mut peers_lock = peers.write().await;
                 let mut addresses_lock = peer_addresses.write().await;
 
-                let mut peer_conn = PeerConnection::new(peer_id, addr);
+                let mut peer_conn = PeerConnection::new(acking_peer_id, addr);
                 peer_conn.state = ConnectionState::HelloExchanged;
-                peer_conn.update_received_time();
 
-                peers_lock.insert(peer_id, peer_conn);
-                addresses_lock.insert(addr, peer_id);
+                peers_lock.insert(acking_peer_id, peer_conn);
+                addresses_lock.insert(addr, acking_peer_id);
 
-                // Generate DH keypair and send public key
-                let (private_key, public_key) = CryptoProvider::generate_dh_keypair();
-                let dh_message = Phase1Message::DHPubKey {
-                    pub_key: public_key.to_bytes(),
-                };
+                // Release locks before sending event and subsequent messages
+                drop(peers_lock);
+                drop(addresses_lock);
 
-                let bytes = protocol::serialize(&dh_message).map_err(|e| {
-                    Error::Serialization(format!("Failed to serialize DHPubKey: {}", e))
-                })?;
-
-                socket
-                    .send_to(&bytes, addr)
-                    .await
-                    .map_err(|e| Error::Network(format!("Failed to send DHPubKey: {}", e)))?;
-
-                // Update the peer's state
-                if let Some(peer_conn) = peers_lock.get_mut(&peer_id) {
-                    peer_conn.private_key = Some(DebugEphemeralSecret(private_key));
-                    peer_conn.state = ConnectionState::KeyExchanged;
-                }
-
-                // Notify about the new peer
+                // Send event AFTER releasing locks
                 let event = NetworkEvent::PeerConnected {
-                    peer_id,
+                    peer_id: acking_peer_id,
                     address: addr,
                 };
+                event_sender.send(event).await.map_err(|e| {
+                    Error::Network(format!("Failed to send PeerConnected event: {}", e))
+                })?;
 
-                event_sender
-                    .send(event)
-                    .await
-                    .map_err(|e| Error::Network(format!("Failed to send event: {}", e)))?;
+                // Generate *our* (client's) DH keypair
+                let (client_private_key, client_public_key) = CryptoProvider::generate_dh_keypair();
+
+                // Send *our* (client's) DH public key
+                let dh_message = Phase1Message::DHPubKey {
+                    pub_key: client_public_key.to_bytes(),
+                };
+                let bytes = protocol::serialize(&dh_message)?;
+                socket.send_to(&bytes, addr).await?;
+
+                // Update the peer connection state for the server
+                let mut peers_lock = peers.write().await;
+                if let Some(server_conn) = peers_lock.get_mut(&acking_peer_id) {
+                    server_conn.our_public_key = Some(client_public_key);
+                    server_conn.private_key = Some(DebugEphemeralSecret(client_private_key));
+                }
+                info!("Processed HelloAck from {}, sent DHPubKey", acking_peer_id);
             }
 
             Phase1Message::DHPubKey { pub_key } => {
-                if let Some(peer_id) = peer_id {
+                if let Some(peer_id) = incoming_peer_id_opt {
+                    info!("Received DHPubKey from {}", peer_id);
                     let mut peers_lock = peers.write().await;
 
                     if let Some(peer_conn) = peers_lock.get_mut(&peer_id) {
                         peer_conn.update_received_time();
+                        let received_peer_public_key = PublicKey::from(pub_key);
+                        info!("Stored peer public key for {}", peer_id);
+                        peer_conn.peer_public_key = Some(received_peer_public_key);
 
-                        // Store the peer's public key
-                        let peer_public_key = PublicKey::from(pub_key);
-                        peer_conn.peer_public_key = Some(peer_public_key);
+                        // Check if ready to derive keys
+                        if peer_conn.private_key.is_some() && peer_conn.our_public_key.is_some() {
+                            info!("Keys available, attempting derivation for {}", peer_id);
+                            // Use a block to manage variable scope and take ownership cleanly
+                            let maybe_derived_keys = {
+                                // Take ownership of private key within this scope
+                                let our_private_key =
+                                    peer_conn.private_key.take().unwrap().into_inner();
+                                let our_public_key = peer_conn.our_public_key.unwrap(); // Should be Some
+                                let peer_public_key = peer_conn.peer_public_key.unwrap(); // Should be Some
 
-                        // Compute shared secret if we have our private key
-                        if let Some(private_key) = peer_conn.private_key.take() {
-                            let shared_secret = CryptoProvider::compute_shared_secret(
-                                private_key.into_inner(),
-                                &peer_public_key,
-                            );
-                            peer_conn.shared_secret = Some(shared_secret);
+                                // Compute shared secret
+                                let shared_secret = CryptoProvider::compute_shared_secret(
+                                    our_private_key,
+                                    &peer_public_key,
+                                );
 
-                            // Derive keys from shared secret
-                            let room_id_bytes = b"room_id"; // placeholder, should use actual room ID bytes
-
-                            // Derive encryption key
-                            let encryption_key = CryptoProvider::derive_key(
-                                &shared_secret,
-                                room_id_bytes,
-                                b"encryption",
-                                32, // 32 bytes for ChaCha20Poly1305
-                            )
-                            .map_err(|e| {
-                                Error::Crypto(format!("Failed to derive encryption key: {}", e))
-                            })?;
-
-                            // Derive decryption key
-                            let decryption_key = CryptoProvider::derive_key(
-                                &shared_secret,
-                                room_id_bytes,
-                                b"decryption",
-                                32, // 32 bytes for ChaCha20Poly1305
-                            )
-                            .map_err(|e| {
-                                Error::Crypto(format!("Failed to derive decryption key: {}", e))
-                            })?;
-
-                            // Derive HMAC key
-                            let hmac_key = CryptoProvider::derive_key(
-                                &shared_secret,
-                                room_id_bytes,
-                                b"hmac",
-                                32, // 32 bytes for HMAC-SHA256
-                            )
-                            .map_err(|e| {
-                                Error::Crypto(format!("Failed to derive HMAC key: {}", e))
-                            })?;
-
-                            peer_conn.encryption_key = Some(encryption_key);
-                            peer_conn.decryption_key = Some(decryption_key);
-                            peer_conn.hmac_key = Some(hmac_key);
-
-                            // Create and send AuthTag
-                            if let Some(hmac_key) = &peer_conn.hmac_key {
-                                // Compute HMAC over the concatenated keys
-                                let tag = CryptoProvider::hmac(
-                                    hmac_key,
-                                    &pub_key[..], // Just use the peer's public key bytes
-                                )
-                                .map_err(|e| {
-                                    Error::Crypto(format!("Failed to compute HMAC: {}", e))
+                                // Retrieve RoomId and Peer IDs for KDF context
+                                let room_id = current_room_id.ok_or_else(|| {
+                                    error!("Room ID not set when processing DHPubKey");
+                                    Error::InvalidState(
+                                        "Room ID not set when processing DHPubKey".to_string(),
+                                    )
                                 })?;
-
-                                // Send AuthTag
-                                let auth_tag = Phase1Message::AuthTag { tag };
-                                let bytes = protocol::serialize(&auth_tag).map_err(|e| {
+                                let room_id_bytes = bincode::serialize(&room_id).map_err(|e| {
                                     Error::Serialization(format!(
-                                        "Failed to serialize AuthTag: {}",
+                                        "Failed to serialize room_id for KDF: {}",
                                         e
                                     ))
                                 })?;
 
-                                socket.send_to(&bytes, addr).await.map_err(|e| {
-                                    Error::Network(format!("Failed to send AuthTag: {}", e))
-                                })?;
+                                // Determine key derivation order based on PeerIds
+                                let (enc_context, dec_context) = if self_peer_id <= peer_id {
+                                    (b"room-A-to-B", b"room-B-to-A")
+                                } else {
+                                    (b"room-B-to-A", b"room-A-to-B")
+                                };
 
-                                // Update state to authenticated
-                                peer_conn.state = ConnectionState::Authenticated;
+                                // Derive keys using shared secret, room_id context, and peer-order contexts
+                                info!(
+                                    "Deriving keys for {} <=> {} using room {}",
+                                    self_peer_id, peer_id, room_id
+                                );
+                                info!("  Encrypt Context: {:?}", std::str::from_utf8(enc_context));
+                                info!("  Decrypt Context: {:?}", std::str::from_utf8(dec_context));
+
+                                let encryption_key = CryptoProvider::derive_key(
+                                    &shared_secret,
+                                    &room_id_bytes,
+                                    enc_context,
+                                    32,
+                                )?;
+                                let decryption_key = CryptoProvider::derive_key(
+                                    &shared_secret,
+                                    &room_id_bytes,
+                                    dec_context,
+                                    32,
+                                )?;
+                                let hmac_key = CryptoProvider::derive_key(
+                                    &shared_secret,
+                                    &room_id_bytes,
+                                    b"room-hmac",
+                                    32,
+                                )?; // HMAC key can be common
+                                info!("Keys derived successfully for {}", peer_id);
+
+                                // Return derived keys and shared secret
+                                Some((
+                                    shared_secret,
+                                    encryption_key,
+                                    decryption_key,
+                                    hmac_key,
+                                    our_public_key,
+                                    peer_public_key,
+                                ))
+                            };
+
+                            if let Some((
+                                shared_secret,
+                                encryption_key,
+                                decryption_key,
+                                hmac_key,
+                                our_public_key,
+                                peer_public_key,
+                            )) = maybe_derived_keys
+                            {
+                                // Store derived keys in the connection state
+                                peer_conn.shared_secret = Some(shared_secret);
+                                peer_conn.encryption_key = Some(encryption_key);
+                                peer_conn.decryption_key = Some(decryption_key);
+                                peer_conn.hmac_key = Some(hmac_key.clone());
+
+                                // Create and send AuthTag
+                                // HMAC over concatenated keys: sort keys first for consistency
+                                let key_a = our_public_key.as_bytes();
+                                let key_b = peer_public_key.as_bytes();
+                                let data_to_hmac = {
+                                    let mut data = Vec::with_capacity(64);
+                                    if key_a <= key_b {
+                                        data.extend_from_slice(key_a);
+                                        data.extend_from_slice(key_b);
+                                    } else {
+                                        data.extend_from_slice(key_b);
+                                        data.extend_from_slice(key_a);
+                                    }
+                                    data
+                                };
+                                info!("Calculating AuthTag HMAC for {}", peer_id);
+                                let tag = CryptoProvider::hmac(&hmac_key, &data_to_hmac)?;
+                                let auth_tag_msg = Phase1Message::AuthTag { tag };
+                                let bytes = protocol::serialize(&auth_tag_msg)?;
+                                let peer_addr = peer_conn.info.address;
+
+                                // Release lock before await
+                                info!("Releasing lock to send AuthTag to {}", peer_id);
+                                drop(peers_lock);
+
+                                socket.send_to(&bytes, peer_addr).await?;
+                                info!("Sent AuthTag to {}", peer_id);
+
+                                // Update state locally (re-acquire lock)
+                                let mut peers_lock = peers.write().await;
+                                if let Some(peer_conn) = peers_lock.get_mut(&peer_id) {
+                                    peer_conn.state = ConnectionState::KeyExchanged;
+                                    info!("Set state to KeyExchanged for {}", peer_id);
+                                }
                             }
+                            // else: KDF failed, error already propagated by `?`
+                        } else {
+                            // Keys not ready yet, just stored the received key
+                            info!(
+                                "Received DHPubKey from {}, but local keys not ready yet.",
+                                peer_id
+                            );
+                            peer_conn.state = ConnectionState::HelloExchanged; // Remain in HelloExchanged
                         }
                     }
+                } else {
+                    warn!("Received DHPubKey from unknown address: {}", addr);
                 }
             }
 
             Phase1Message::AuthTag { tag } => {
-                if let Some(peer_id) = peer_id {
+                if let Some(peer_id) = incoming_peer_id_opt {
+                    info!("Received AuthTag from {}", peer_id);
                     let mut peers_lock = peers.write().await;
-
                     if let Some(peer_conn) = peers_lock.get_mut(&peer_id) {
                         peer_conn.update_received_time();
 
-                        // Verify the AuthTag
-                        if let (Some(hmac_key), Some(peer_public_key)) =
-                            (&peer_conn.hmac_key, &peer_conn.peer_public_key)
-                        {
-                            // Verify HMAC
-                            match CryptoProvider::verify_hmac(
-                                hmac_key,
-                                peer_public_key.as_bytes(), // Just use the peer's public key bytes
-                                &tag,
-                            ) {
+                        // Check if ready to verify
+                        if let (Some(hmac_key), Some(our_public_key), Some(peer_public_key)) = (
+                            &peer_conn.hmac_key,
+                            &peer_conn.our_public_key,
+                            &peer_conn.peer_public_key,
+                        ) {
+                            info!(
+                                "Keys available, attempting AuthTag verification for {}",
+                                peer_id
+                            );
+                            // Concatenate keys in the *same order* as calculation:
+                            // sort keys first for consistency
+                            let key_a = our_public_key.as_bytes();
+                            let key_b = peer_public_key.as_bytes();
+                            let data_to_verify = {
+                                let mut data = Vec::with_capacity(64);
+                                if key_a <= key_b {
+                                    data.extend_from_slice(key_a);
+                                    data.extend_from_slice(key_b);
+                                } else {
+                                    data.extend_from_slice(key_b);
+                                    data.extend_from_slice(key_a);
+                                }
+                                data
+                            };
+
+                            match CryptoProvider::verify_hmac(hmac_key, &data_to_verify, &tag) {
                                 Ok(()) => {
-                                    // HMAC verified, update state to authenticated
+                                    info!("AuthTag verified successfully for {}", peer_id);
                                     peer_conn.state = ConnectionState::Authenticated;
+                                    info!("Set state to Authenticated for {}", peer_id);
 
-                                    // Now that we have a secure channel, we can send a join request
-                                    let join_request = Phase1Message::JoinRequest {
-                                        peer_id: peer_id,         // Our peer ID
-                                        name: "User".to_string(), // Replace with actual user name
-                                    };
+                                    // Send AuthenticationSucceeded event
+                                    let auth_event =
+                                        NetworkEvent::AuthenticationSucceeded { peer_id };
+                                    let peer_addr = peer_conn.info.address; // Get address before releasing lock
+                                    let encryption_key_opt = peer_conn.encryption_key.clone(); // Clone key before releasing
+                                    drop(peers_lock); // Release lock before await
 
-                                    // Encrypt the join request
-                                    if let Some(encryption_key) = &peer_conn.encryption_key {
-                                        let plaintext = protocol::serialize(&join_request)
-                                            .map_err(|e| {
-                                                Error::Serialization(format!(
-                                                    "Failed to serialize JoinRequest: {}",
-                                                    e
-                                                ))
+                                    info!("Sending AuthenticationSucceeded event for {}", peer_id);
+                                    if let Err(e) = event_sender.send(auth_event).await {
+                                        error!(
+                                            "Failed to send AuthenticationSucceeded event: {}",
+                                            e
+                                        );
+                                        return Err(Error::Network(format!(
+                                            "Failed to send event: {}",
+                                            e
+                                        )));
+                                    }
+
+                                    // If we are the client, send JoinRequest
+                                    if !is_server {
+                                        info!(
+                                            "Client {} authenticated, sending JoinRequest",
+                                            peer_id
+                                        );
+                                        let join_request = Phase1Message::JoinRequest {
+                                            peer_id: self_peer_id,
+                                            name: "User".to_string(),
+                                        };
+                                        let encryption_key =
+                                            encryption_key_opt.ok_or_else(|| {
+                                                Error::InvalidState(
+                                                    "Missing encryption key after auth".to_string(),
+                                                )
                                             })?;
-
+                                        let plaintext = protocol::serialize(&join_request)?;
                                         let encrypted = CryptoProvider::encrypt(
-                                            encryption_key,
+                                            &encryption_key,
                                             &plaintext,
-                                            &[], // No associated data for now
-                                        )
-                                        .map_err(|e| {
-                                            Error::Crypto(format!(
-                                                "Failed to encrypt JoinRequest: {}",
-                                                e
-                                            ))
-                                        })?;
-
-                                        // Send encrypted message
+                                            &[],
+                                        )?;
                                         let encrypted_msg =
                                             Phase1Message::EncryptedMessage { payload: encrypted };
+                                        let bytes = protocol::serialize(&encrypted_msg)?;
+                                        socket.send_to(&bytes, peer_addr).await?;
+                                        info!("Sent encrypted JoinRequest to {}", peer_id);
 
-                                        let bytes =
-                                            protocol::serialize(&encrypted_msg).map_err(|e| {
-                                                Error::Serialization(format!(
-                                                    "Failed to serialize EncryptedMessage: {}",
-                                                    e
-                                                ))
-                                            })?;
-
-                                        socket.send_to(&bytes, addr).await.map_err(|e| {
-                                            Error::Network(format!(
-                                                "Failed to send encrypted JoinRequest: {}",
-                                                e
-                                            ))
-                                        })?;
-
-                                        // Update state to join requested
-                                        peer_conn.state = ConnectionState::JoinRequested;
+                                        // Update state to join requested (re-acquire lock)
+                                        let mut peers_lock = peers.write().await;
+                                        if let Some(peer_conn) = peers_lock.get_mut(&peer_id) {
+                                            peer_conn.state = ConnectionState::JoinRequested;
+                                            info!("Set state to JoinRequested for {}", peer_id);
+                                        }
+                                    } else {
+                                        // Server side: Authentication complete.
+                                        info!("Server authenticated client {}, waiting for JoinRequest", peer_id);
                                     }
                                 }
                                 Err(e) => {
-                                    error!("HMAC verification failed: {}", e);
-
-                                    // Notify about authentication failure
+                                    error!("HMAC verification failed for {}: {}", peer_id, e);
+                                    peer_conn.state = ConnectionState::None; // Reset state on failure?
+                                    drop(peers_lock); // Release lock before await
                                     let event = NetworkEvent::AuthenticationFailed {
                                         address: addr,
                                         reason: "HMAC verification failed".to_string(),
                                     };
-
                                     event_sender.send(event).await.map_err(|e| {
                                         Error::Network(format!(
                                             "Failed to send auth failure event: {}",
@@ -637,91 +725,226 @@ impl Phase1Network {
                                     })?;
                                 }
                             }
+                        } else {
+                            warn!(
+                                "Received AuthTag from {} but missing keys/state for verification. State: {:?}, Has HMAC Key: {}, Has Our Key: {}, Has Peer Key: {}",
+                                peer_id,
+                                peer_conn.state,
+                                peer_conn.hmac_key.is_some(),
+                                peer_conn.our_public_key.is_some(),
+                                peer_conn.peer_public_key.is_some()
+                            );
+                            // Should we change state here? Maybe back to HelloExchanged?
                         }
                     }
+                } else {
+                    warn!("Received AuthTag from unknown address: {}", addr);
                 }
             }
 
             Phase1Message::EncryptedMessage { payload } => {
-                if let Some(peer_id) = peer_id {
+                if let Some(connection_peer_id) = incoming_peer_id_opt {
                     let peers_lock = peers.read().await;
-
-                    if let Some(peer_conn) = peers_lock.get(&peer_id) {
-                        // Only process encrypted messages from authenticated peers
+                    if let Some(peer_conn) = peers_lock.get(&connection_peer_id) {
+                        // Check state *before* logging potentially sensitive info
                         if peer_conn.state == ConnectionState::Authenticated
-                            || peer_conn.state == ConnectionState::JoinRequested
                             || peer_conn.state == ConnectionState::Joined
+                            || peer_conn.state == ConnectionState::JoinRequested
                         {
+                            info!(
+                                "Received EncryptedMessage from {} (state: {:?}), attempting decryption...",
+                                connection_peer_id,
+                                peer_conn.state
+                            );
                             // Decrypt the message
                             if let Some(decryption_key) = &peer_conn.decryption_key {
-                                match CryptoProvider::decrypt(
-                                    decryption_key,
-                                    &payload,
-                                    &[], // No associated data for now
-                                ) {
+                                match CryptoProvider::decrypt(decryption_key, &payload, &[]) {
                                     Ok(plaintext) => {
+                                        info!(
+                                            "Decryption successful for message from {}",
+                                            connection_peer_id
+                                        );
                                         // Deserialize the decrypted message
                                         match protocol::deserialize(&plaintext) {
                                             Ok(inner_message) => {
+                                                info!(
+                                                    "Deserialized inner message from {}: {:?}",
+                                                    connection_peer_id, inner_message
+                                                );
+                                                // Drop read lock before potentially acquiring write lock or sending event
+                                                drop(peers_lock);
+
                                                 // Process the inner message
                                                 match inner_message {
                                                     Phase1Message::JoinRequest {
-                                                        peer_id,
+                                                        peer_id: requesting_peer_id,
                                                         name,
                                                     } => {
-                                                        // Notify about join request
+                                                        info!(
+                                                            "Processing JoinRequest from {}",
+                                                            requesting_peer_id
+                                                        );
                                                         let event = NetworkEvent::JoinRequested {
-                                                            peer_id,
+                                                            peer_id: requesting_peer_id,
                                                             name,
                                                             address: addr,
                                                         };
-
-                                                        event_sender.send(event).await
-                                                            .map_err(|e| Error::Network(format!("Failed to send join request event: {}", e)))?;
+                                                        event_sender.send(event).await.map_err(|e| Error::Network(format!("Failed to send JoinRequested event: {}", e)))?
                                                     }
                                                     Phase1Message::JoinResponse {
                                                         approved,
                                                         reason,
                                                     } => {
+                                                        info!("Processing JoinResponse (approved: {}) from {}", approved, connection_peer_id);
                                                         // Update peer state if approved
                                                         if approved {
                                                             let mut peers_lock =
                                                                 peers.write().await;
-                                                            if let Some(peer_conn) =
-                                                                peers_lock.get_mut(&peer_id)
+                                                            if let Some(peer_conn) = peers_lock
+                                                                .get_mut(&connection_peer_id)
                                                             {
                                                                 peer_conn.state =
                                                                     ConnectionState::Joined;
+                                                                info!(
+                                                                    "Set state to Joined for {}",
+                                                                    connection_peer_id
+                                                                );
                                                             }
                                                         }
-
                                                         // Notify about join response
                                                         let event =
                                                             NetworkEvent::JoinResponseReceived {
                                                                 approved,
                                                                 reason,
                                                             };
-
-                                                        event_sender.send(event).await
-                                                            .map_err(|e| Error::Network(format!("Failed to send join response event: {}", e)))?;
+                                                        event_sender.send(event).await.map_err(|e| Error::Network(format!("Failed to send JoinResponseReceived event: {}", e)))?;
                                                     }
-                                                    // Handle other message types...
+                                                    Phase1Message::Ping {
+                                                        peer_id: pinging_peer,
+                                                    } => {
+                                                        info!(
+                                                            "Processing Ping from {}",
+                                                            pinging_peer
+                                                        );
+                                                        // Send Pong
+                                                        let pong = Phase1Message::Pong {
+                                                            peer_id: self_peer_id,
+                                                        };
+                                                        let bytes = protocol::serialize(&pong)?;
+                                                        let mut pong_sent = false;
+                                                        {
+                                                            // Re-acquire read lock to get encryption key and address
+                                                            let peers_lock = peers.read().await;
+                                                            if let Some(peer_conn) =
+                                                                peers_lock.get(&connection_peer_id)
+                                                            {
+                                                                if let Some(encryption_key) =
+                                                                    &peer_conn.encryption_key
+                                                                {
+                                                                    let encrypted_pong_payload =
+                                                                        CryptoProvider::encrypt(
+                                                                            encryption_key,
+                                                                            &bytes,
+                                                                            &[],
+                                                                        )?;
+                                                                    let encrypted_pong_msg = Phase1Message::EncryptedMessage { payload: encrypted_pong_payload };
+                                                                    let final_bytes =
+                                                                        protocol::serialize(
+                                                                            &encrypted_pong_msg,
+                                                                        )?;
+                                                                    let target_addr =
+                                                                        peer_conn.info.address;
+                                                                    drop(peers_lock);
+                                                                    socket
+                                                                        .send_to(
+                                                                            &final_bytes,
+                                                                            target_addr,
+                                                                        )
+                                                                        .await?;
+                                                                    info!("Sent encrypted Pong to {} in response to Ping", connection_peer_id);
+                                                                    pong_sent = true;
+                                                                } else {
+                                                                    warn!("Cannot send Pong to {}: Missing encryption key", connection_peer_id);
+                                                                }
+                                                            } else {
+                                                                warn!("Cannot send Pong to {}: Peer disappeared", connection_peer_id);
+                                                            }
+                                                        }
+                                                        // Also forward the original Ping message event
+                                                        if pong_sent {
+                                                            // Only forward if we successfully sent Pong
+                                                            let event =
+                                                                NetworkEvent::MessageReceived {
+                                                                    peer_id: connection_peer_id,
+                                                                    message: Phase1Message::Ping {
+                                                                        peer_id: pinging_peer,
+                                                                    }, // Reconstruct Ping
+                                                                };
+                                                            event_sender.send(event).await.map_err(|e| Error::Network(format!("Failed to send Ping MessageReceived event: {}", e)))?;
+                                                            info!("Sent MessageReceived event for Ping from {}", pinging_peer);
+                                                        }
+                                                    }
+                                                    Phase1Message::Pong {
+                                                        peer_id: ponging_peer,
+                                                    } => {
+                                                        info!(
+                                                            "Processing Pong from {}",
+                                                            ponging_peer
+                                                        );
+                                                        let mut valid_pong = false;
+                                                        {
+                                                            // Handle Pong (update last received time)
+                                                            let mut peers_lock =
+                                                                peers.write().await;
+                                                            if let Some(peer_conn) = peers_lock
+                                                                .get_mut(&connection_peer_id)
+                                                            {
+                                                                if peer_conn.info.peer_id
+                                                                    == ponging_peer
+                                                                {
+                                                                    peer_conn
+                                                                        .update_received_time();
+                                                                    info!("Updated last received time for {}", ponging_peer);
+                                                                    valid_pong = true;
+                                                                } else {
+                                                                    warn!("Pong inner peer ID {} does not match connection ID {}", ponging_peer, connection_peer_id);
+                                                                }
+                                                            } else {
+                                                                warn!("Received Pong for non-existent peer connection {}", connection_peer_id);
+                                                            }
+                                                        }
+
+                                                        if valid_pong {
+                                                            // Forward the Pong message event
+                                                            let event =
+                                                                NetworkEvent::MessageReceived {
+                                                                    peer_id: connection_peer_id, // ID of the peer who sent the encrypted message
+                                                                    message: Phase1Message::Pong {
+                                                                        peer_id: ponging_peer,
+                                                                    }, // Reconstruct the Pong message
+                                                                };
+                                                            event_sender.send(event).await.map_err(|e| Error::Network(format!("Failed to send Pong MessageReceived event: {}", e)))?;
+                                                            info!("Sent MessageReceived event for Pong from {}", ponging_peer);
+                                                        }
+                                                    }
+                                                    // Handle other inner message types...
                                                     _ => {
-                                                        // Forward message to application
+                                                        info!(
+                                                            "Forwarding other message type from {}",
+                                                            connection_peer_id
+                                                        );
                                                         let event = NetworkEvent::MessageReceived {
-                                                            peer_id,
+                                                            peer_id: connection_peer_id,
                                                             message: inner_message,
                                                         };
-
-                                                        event_sender.send(event).await
-                                                            .map_err(|e| Error::Network(format!("Failed to send message received event: {}", e)))?;
+                                                        event_sender.send(event).await.map_err(|e| Error::Network(format!("Failed to send MessageReceived event: {}", e)))?;
                                                     }
                                                 }
                                             }
                                             Err(e) => {
                                                 warn!(
-                                                    "Failed to deserialize decrypted message: {}",
-                                                    e
+                                                    "Failed to deserialize decrypted message from {}: {}",
+                                                    connection_peer_id, e
                                                 );
                                             }
                                         }
@@ -730,52 +953,32 @@ impl Phase1Network {
                                         warn!("Failed to decrypt message from {}: {}", addr, e);
                                     }
                                 }
+                            } else {
+                                warn!(
+                                    "Received EncryptedMessage from {}, but missing decryption key",
+                                    connection_peer_id
+                                );
                             }
+                        } else {
+                            warn!(
+                                "Received EncryptedMessage from {} but peer state is {:?}, ignoring",
+                                connection_peer_id,
+                                peer_conn.state
+                            );
                         }
                     }
+                } else {
+                    warn!("Received EncryptedMessage from unknown address: {}", addr);
                 }
             }
-
-            Phase1Message::Ping {
-                peer_id: ping_peer_id,
-            } => {
-                // Send a pong in response
-                let pong = Phase1Message::Pong {
-                    peer_id: ping_peer_id,
-                };
-
-                let bytes = protocol::serialize(&pong).map_err(|e| {
-                    Error::Serialization(format!("Failed to serialize Pong: {}", e))
-                })?;
-
-                socket
-                    .send_to(&bytes, addr)
-                    .await
-                    .map_err(|e| Error::Network(format!("Failed to send Pong: {}", e)))?;
-
-                // Update the last received time
-                if let Some(received_peer_id) = peer_id {
-                    let mut peers_lock = peers.write().await;
-                    if let Some(peer_conn) = peers_lock.get_mut(&received_peer_id) {
-                        peer_conn.update_received_time();
-                    }
-                }
+            // Catch-all for other unencrypted message types received unexpectedly
+            other => {
+                warn!(
+                    "Received unexpected unencrypted message type {:?} from {}. Ignoring.",
+                    other, addr
+                );
             }
-
-            Phase1Message::Pong { peer_id: _ } => {
-                // Update the last received time
-                if let Some(received_peer_id) = peer_id {
-                    let mut peers_lock = peers.write().await;
-                    if let Some(peer_conn) = peers_lock.get_mut(&received_peer_id) {
-                        peer_conn.update_received_time();
-                    }
-                }
-            }
-
-            // Handle other message types...
-            _ => {}
         }
-
         Ok(())
     }
 
