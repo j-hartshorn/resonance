@@ -2285,6 +2285,7 @@ dependencies = [
  "tokio-test",
  "webrtc",
  "webrtc-audio-processing",
+ "x25519-dalek",
 ]
 
 [[package]]
