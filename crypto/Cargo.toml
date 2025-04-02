@@ -5,20 +5,17 @@ edition = "2021"
 
 [dependencies]
 room_core = { path = "../room_core" }
-tokio = { workspace = true } # For async traits if needed, unlikely
+tokio = { workspace = true }          # For async traits if needed, unlikely
 log = { workspace = true }
-serde = { workspace = true } # Keys might be serializable
-rand = "0.8"                 # For key generation
-bytes = { workspace = true } # Crypto operations often use byte slices
-# TODO: Add specific crypto dependencies when implementing Phase 2
-# Example dependencies (choose appropriate ones):
-# ring = "0.17"
-# hkdf = "0.12"
-# chacha20poly1305 = "0.10"
-# hmac = "0.12"
-# sha2 = "0.10"
-# x25519-dalek = "2.0"
-# aes-gcm = "0.10"
+serde = { workspace = true }          # Keys might be serializable
+rand = "0.8"                          # For key generation
+bytes = { workspace = true }          # Crypto operations often use byte slices
+x25519-dalek = "2.0"                  # For Diffie-Hellman key exchange
+sha2 = "0.10"                         # SHA-256 for HMAC
+hmac = "0.12"                         # HMAC implementation
+hkdf = "0.12"                         # Key derivation function
+chacha20poly1305 = "0.10"             # AEAD encryption
+thiserror = "1.0"                     # For error enums
 
 [dev-dependencies]
 mockall = { workspace = true }
