@@ -3,7 +3,7 @@
 //! This crate handles all networking for the application
 //! from basic UDP sockets to WebRTC connection management.
 
-use core::{Error, PeerId, RoomId};
+use room_core::{Error, PeerId, RoomId};
 use log::{debug, error, info, trace, warn};
 
 /// Placeholder for future protocol module

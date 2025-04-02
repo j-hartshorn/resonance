@@ -1,14 +1,12 @@
 # Implementation Plan: room.rs
 
-**(As of: Wednesday, April 2, 2025 at 8:36 AM BST - Brighton and Hove, England, United Kingdom)**
-
 This plan outlines a step-by-step approach for implementing the `room.rs` application, emphasizing Test-Driven Development (TDD) principles.
 
 ## Phase 0: Project Setup & Core Types
 
 ### Action
-1.  **Initialize Project:** Set up a Rust workspace and the following member crates: `app_cli`, `core`, `audio`, `audio_io`, `spatial`, `network`, `crypto`, `room`, `visualization`, `config`.
-2.  **Define Core Types (`core` crate):**
+1.  **Initialize Project:** Set up a Rust workspace and the following member crates: `app_cli`, `room_core`, `audio`, `audio_io`, `spatial`, `network`, `crypto`, `room`, `visualization`, `settings_manager`.
+2.  **Define Core Types (`room_core` crate):**
     * `PeerId` struct/type alias.
     * `RoomID` struct/type alias.
     * Unified `Error` enum using `thiserror`.
@@ -16,7 +14,7 @@ This plan outlines a step-by-step approach for implementing the `room.rs` applic
 3.  **Add Core Dependencies:** Include `tokio`, `serde`, `thiserror`, `log` facade in relevant `Cargo.toml` files.
 
 ### TDD
-* **Unit Test (`core`):** Verify methods/impls on core types (`Display`, `Error` source chaining, etc.).
+* **Unit Test (`room_core`):** Verify methods/impls on core types (`Display`, `Error` source chaining, etc.).
 
 ### Integration Testing
 * N/A
@@ -24,7 +22,7 @@ This plan outlines a step-by-step approach for implementing the `room.rs` applic
 ## Phase 1: Configuration & Basic CLI Shell
 
 ### Action
-1.  **Implement `config` Crate:**
+1.  **Implement `settings_manager` Crate:**
     * Define `Settings` struct (`serde` derive) for username, audio device preferences (initially strings/defaults), STUN/TURN list.
     * Implement loading from TOML (`config.toml`), handling file-not-found (use defaults).
     * Implement saving `Settings` to TOML.
@@ -36,7 +34,7 @@ This plan outlines a step-by-step approach for implementing the `room.rs` applic
     * Render static placeholder content.
 
 ### TDD
-* **Unit Test (`config`):** Test loading defaults, valid TOML, handling invalid TOML, save/reload roundtrip.
+* **Unit Test (`settings_manager`):** Test loading defaults, valid TOML, handling invalid TOML, save/reload roundtrip.
 * **Unit Test (`app_cli`):** Mock terminal backend. Test layout rendering with placeholders. Test quit event handling.
 
 ### Integration Testing
@@ -213,8 +211,8 @@ This plan outlines a step-by-step approach for implementing the `room.rs` applic
 ## Phase 10: Refinements & Hardening
 
 ### Action
-1.  **Implement Room History & Rejoin:** Store last `RoomID`/peer info in `config`, add "Rejoin" option in `app_cli` triggering connection via `network`.
-2.  **Implement Settings Menu:** Create TUI screens in `app_cli` to view/modify settings stored via `config`.
+1.  **Implement Room History & Rejoin:** Store last `RoomID`/peer info in `settings_manager`, add "Rejoin" option in `app_cli` triggering connection via `network`.
+2.  **Implement Settings Menu:** Create TUI screens in `app_cli` to view/modify settings stored via `settings_manager`.
 3.  **Implement Peer Discovery/Healing:** `room` logic periodically instructs `network` (via command channel) to send "request peer list" messages; `network` handles responses, informs `room` of discrepancies.
 4.  **Implement Fuzz Testing:** Set up `cargo fuzz` targets for `network::protocol` parsing, link parsing. Run regularly.
 5.  **Comprehensive Error Handling:** Review error propagation (`core::Error`), ensure graceful handling and user feedback in TUI for network disconnects, crypto errors, device errors etc.

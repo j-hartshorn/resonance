@@ -3,7 +3,7 @@
 //! This crate provides spatial audio mixing using AudioNimbus
 //! and Steam Audio libraries.
 
-use core::{AudioBuffer, Error};
+use room_core::{AudioBuffer, Error};
 use log::{debug, error, info, trace, warn};
 
 /// Spatial audio mixer

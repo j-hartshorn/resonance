@@ -3,7 +3,7 @@
 //! This crate provides FFT and visualization utilities
 //! for displaying audio data in the UI.
 
-use core::{AudioBuffer, Error};
+use room_core::{AudioBuffer, Error};
 use log::{debug, error, info, trace, warn};
 
 /// Audio visualization processor

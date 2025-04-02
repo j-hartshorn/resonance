@@ -3,7 +3,7 @@
 //! This crate provides cryptographic primitives for secure
 //! communication between peers.
 
-use core::Error;
+use room_core::Error;
 use log::{debug, error, info, trace, warn};
 
 /// Will provide key generation, AEAD encryption, KDF, and HMAC

@@ -3,7 +3,7 @@
 //! This crate provides high-level audio processing capabilities
 //! by coordinating lower-level components like audio_io and spatial.
 
-use core::Error;
+use room_core::Error;
 use log::{debug, error, info, trace, warn};
 
 /// Entry point for the audio subsystem

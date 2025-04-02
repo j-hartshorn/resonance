@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-core = { path = "../core" }
+room_core = { path = "../room_core" }
 tokio = { workspace = true }
 log = { workspace = true }
 rustfft = "6.1"              # Added for FFT from plan

@@ -4,14 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-core = { path = "../core" }
-config = { path = "../config" }
+room_core = { path = "../room_core" }
+settings_manager = { path = "../settings_manager" }
 network = { path = "../network" }
 room = { path = "../room" }
 visualization = { path = "../visualization" }
 audio = { path = "../audio" }
 tokio = { workspace = true }
 ratatui = "0.26"
+crossterm = "0.27"
 log = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }

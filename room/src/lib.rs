@@ -3,7 +3,7 @@
 //! This crate manages room state, including peer list,
 //! join requests, and other stateful room operations.
 
-use core::{Error, PeerId, RoomId};
+use room_core::{Error, PeerId, RoomId};
 use log::{debug, error, info, trace, warn};
 
 /// Room state container

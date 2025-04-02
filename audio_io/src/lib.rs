@@ -2,7 +2,7 @@
 //!
 //! This crate interfaces with audio hardware using cpal.
 
-use core::{AudioBuffer, Error, CHANNELS, SAMPLE_RATE};
+use room_core::{AudioBuffer, Error, CHANNELS, SAMPLE_RATE};
 use log::{debug, error, info, trace, warn};
 
 /// Audio device interface.

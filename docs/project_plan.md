@@ -1,7 +1,5 @@
 # Project Brief: room.rs - P2P Spatial Audio CLI Chat
 
-**(As of: Tuesday, April 1, 2025 at 9:43 AM BST - London, England)**
-
 ## 1. Introduction / Vision
 
 `room.rs` is envisioned as a command-line (CLI) application, built in Rust, enabling small groups of users (up to 8) to communicate via high-quality, low-latency, end-to-end encrypted audio over the internet. The application will operate on a fully peer-to-peer (P2P) basis after initial connection bootstrapping. A key feature will be the integration of spatial audio processing (using Steam Audio via `AudioNimbus`), allowing users to perceive the voices of participants as originating from distinct locations in a virtual space, enhancing clarity and immersion in group conversations. The user interface will be a Terminal User Interface (TUI).
@@ -59,7 +57,7 @@
 * **Overall Approach:** Peer-to-peer (P2P), command-line application written in Rust using `tokio` for asynchronous operations.
 * **Proposed Crate Structure:**
     * **`app_cli`**: Main binary, TUI logic (`ratatui`), event loop, orchestration.
-    * **`core`**: Shared fundamental types (`PeerId`, `RoomID`, custom errors, etc.).
+    * **`room_core`**: Shared fundamental types (`PeerId`, `RoomID`, custom errors, etc.).
     * **`audio`**: Handles all audio processing.
         * `audio_io`: Audio capture/playback using `cpal`.
         * `codec`: Audio format definitions (Opus encoding/decoding likely handled by `webrtc-rs`).
@@ -68,7 +66,7 @@
     * **`crypto`**: Handles initial link key verification, securing the signaling channel.
     * **`room`**: Manages room state, join requests, peer lists, `RoomID`, enforces user limits. Coordinates peer discovery/updates.
     * **`visualization`**: Spectrogram generation logic.
-    * **`config`**: Loads/saves application settings (e.g., TOML file).
+    * **`settings_manager`**: Loads/saves application settings (e.g., TOML file).
 * **Threading Model:**
     * `tokio` multi-threaded runtime for async tasks (networking, TUI events, room state).
     * Dedicated OS thread for audio capture (`cpal`).
@@ -104,7 +102,7 @@
         * Transport opaque WebRTC signaling messages (SDP Offers/Answers, ICE Candidates) generated/consumed by `webrtc-rs`. (SDP: Session Description Protocol).
     * **Phase 2: WebRTC Connection:**
         * Triggered by `webrtc-rs` after successful signaling exchange via Phase 1 channel.
-        * `webrtc-rs` handles ICE (using STUN/TURN servers from `config`) for NAT traversal.
+        * `webrtc-rs` handles ICE (using STUN/TURN servers from `settings_manager`) for NAT traversal.
         * `webrtc-rs` establishes DTLS connection for secure key exchange.
         * `webrtc-rs` establishes SRTP channel for encrypted Opus audio stream.
         * `webrtc-rs` establishes optional Data Channel over SCTP/DTLS. (SCTP: Stream Control Transmission Protocol).
@@ -141,7 +139,7 @@
 
 ## 9. Potential Development Phases
 
-1.  **Core Setup:** Project structure, `tokio` integration, basic `config` loading.
+1.  **Core Setup:** Project structure, `tokio` integration, basic `settings_manager` loading.
 2.  **Initial Networking & Signaling:** Implement Phase 1 P2P channel (`network`, `crypto`), basic link parsing/verification.
 3.  **WebRTC Basics:** Integrate `webrtc-rs`, implement P2P signaling exchange (SDP/ICE), establish basic DTLS connection.
 4.  **Basic Audio Flow:** Integrate `cpal`, wire up unencrypted/non-spatialized audio capture -> WebRTC (Opus/SRTP) -> playback.

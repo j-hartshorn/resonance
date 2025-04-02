@@ -1,10 +1,10 @@
 [package]
-name = "config"
+name = "settings_manager"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-core = { path = "../core" }
+room_core = { path = "../room_core" }
 serde = { workspace = true }
 tokio = { workspace = true } # May not be strictly needed here
 log = { workspace = true }
@@ -12,7 +12,10 @@ anyhow = { workspace = true }
 config = { version = "0.14", features = [
     "toml",
 ] } # Added for config file handling
+toml = "0.8"
+dirs = "5.0"
 
 [dev-dependencies]
 tokio-test = { workspace = true }
 test-log = { workspace = true }
+tempfile = "3.8"

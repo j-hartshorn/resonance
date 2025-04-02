@@ -235,14 +235,15 @@ dependencies = [
  "anyhow",
  "audio",
  "clap 4.5.35",
- "config 0.1.0",
- "core",
+ "crossterm",
  "env_logger 0.10.2",
  "log",
  "mockall",
  "network",
  "ratatui",
  "room",
+ "room_core",
+ "settings_manager",
  "test-log",
  "tokio",
  "tokio-test",
@@ -384,9 +385,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "audio_io",
- "core",
  "log",
  "mockall",
+ "room_core",
  "spatial",
  "test-log",
  "tokio",
@@ -398,10 +399,10 @@ name = "audio_io"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "core",
  "cpal",
  "log",
  "mockall",
+ "room_core",
  "test-log",
  "tokio",
  "tokio-test",
@@ -797,20 +798,6 @@ dependencies = [
 
 [[package]]
 name = "config"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "config 0.14.1",
- "core",
- "log",
- "serde",
- "test-log",
- "tokio",
- "tokio-test",
-]
-
-[[package]]
-name = "config"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68578f196d2a33ff61b27fae256c3164f65e36382648e30666dde05b8cc9dfdf"
@@ -861,19 +848,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec182b0ca2f35d8fc196cf3404988fd8b8c739a4d270ff118a398feb0cbec1ca"
 dependencies = [
  "unicode-segmentation",
-]
-
-[[package]]
-name = "core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "log",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -985,10 +959,10 @@ name = "crypto"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "core",
  "log",
  "mockall",
  "rand",
+ "room_core",
  "serde",
  "test-log",
  "tokio",
@@ -1228,6 +1202,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44c45a9d03d6676652bcb5e724c7e988de1acad23a711b5217ab9cbecbec2225"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "520f05a5cbd335fae5a99ff7a6ab8627577660ee5cfd6a94a6a929b52ff0321c"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1386,6 +1381,12 @@ dependencies = [
  "syn 1.0.109",
  "synstructure 0.12.6",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "ff"
@@ -2038,10 +2039,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "libredox"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0ff37bd590ca25063e35af745c343cb7a0271906fb7b37e4813e8f79f00268d"
+dependencies = [
+ "bitflags 2.9.0",
+ "libc",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe7db12097d22ec582439daf8618b8fdd1a7bef6270e9af3b1ebcd30893cf413"
 
 [[package]]
 name = "litemap"
@@ -2218,11 +2235,11 @@ dependencies = [
  "anyhow",
  "bincode",
  "bytes",
- "core",
  "crypto",
  "log",
  "mockall",
  "rand",
+ "room_core",
  "serde",
  "serde_json",
  "test-log",
@@ -2415,6 +2432,12 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "option-ext"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "ordered-multimap"
@@ -2783,6 +2806,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_users"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
+dependencies = [
+ "getrandom 0.2.15",
+ "libredox",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "regex"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2868,13 +2902,26 @@ dependencies = [
 name = "room"
 version = "0.1.0"
 dependencies = [
- "core",
  "log",
  "mockall",
+ "room_core",
  "serde",
  "test-log",
  "tokio",
  "tokio-test",
+]
+
+[[package]]
+name = "room_core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "log",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2971,7 +3018,20 @@ dependencies = [
  "bitflags 2.9.0",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rustix"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d97817398dd4bb2e6da002002db259209759911da105da92bec29ccb12cf58bf"
+dependencies = [
+ "bitflags 2.9.0",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.9.3",
  "windows-sys 0.59.0",
 ]
 
@@ -3096,6 +3156,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87607cb1398ed59d48732e575a4c28a7a8ebf2454b964fe3f224f2afc07909e1"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "settings_manager"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "config",
+ "dirs",
+ "log",
+ "room_core",
+ "serde",
+ "tempfile",
+ "test-log",
+ "tokio",
+ "tokio-test",
+ "toml",
 ]
 
 [[package]]
@@ -3225,9 +3302,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "audionimbus",
- "core",
  "log",
  "mockall",
+ "room_core",
  "steam-audio-sys",
  "test-log",
  "tokio",
@@ -3406,6 +3483,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7437ac7763b9b123ccf33c338a5cc1bac6f69b45a136c19bdd8a65e3916435bf"
+dependencies = [
+ "fastrand",
+ "getrandom 0.3.2",
+ "once_cell",
+ "rustix 1.0.5",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3857,8 +3947,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "visualization"
 version = "0.1.0"
 dependencies = [
- "core",
  "log",
+ "room_core",
  "rustfft",
  "test-log",
  "tokio",
@@ -4240,7 +4330,7 @@ dependencies = [
  "either",
  "home",
  "once_cell",
- "rustix",
+ "rustix 0.38.44",
 ]
 
 [[package]]

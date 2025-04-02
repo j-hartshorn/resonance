@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "app_cli",
-    "core",
+    "room_core",
     "audio",
     "audio_io",
     "spatial",
@@ -10,7 +10,7 @@ members = [
     "crypto",
     "room",
     "visualization",
-    "config",
+    "settings_manager",
 ]
 
 [workspace.dependencies]

@@ -16,6 +16,7 @@ The plan for a phased implementaion is contained in [implementation_plan.md](mdc
 - Follow a teast driven design approach, and verify regularly that `cargo test` is successful or fix any errors.
 - Maintain a separation of concerns and follow the modular architecture in the project plan.
 - Prefer a functional programming style
+- You cannot directly run \cargo run\ or similar commands to run the app because the app will run continuously until interrupted or exited. You can ask me to run the app and check for functionality, I will run it with the command you give me and provide you with feedback.
 
 ## Rust programming
 

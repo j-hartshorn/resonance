@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-core = { path = "../core" }
+room_core = { path = "../room_core" }
 audio_io = { path = "../audio_io" }
 spatial = { path = "../spatial" }
 tokio = { workspace = true }
