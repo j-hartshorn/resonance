@@ -235,6 +235,7 @@ dependencies = [
  "anyhow",
  "clap 4.5.35",
  "crossterm",
+ "dirs",
  "env_logger 0.10.2",
  "log",
  "mockall",

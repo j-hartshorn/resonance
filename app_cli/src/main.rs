@@ -2,6 +2,9 @@
 
 mod network_adapter;
 
+#[cfg(test)]
+mod tests;
+
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
@@ -85,6 +88,21 @@ impl App {
             pending_requests: HashMap::new(),
             status_message: None,
         })
+    }
+
+    // Helper method for tests - accepts a pre-configured network adapter
+    #[cfg(test)]
+    fn with_adapter(config: ConfigManager, adapter: NetworkAdapter) -> Self {
+        Self {
+            should_quit: false,
+            config,
+            network_adapter: adapter,
+            state: AppState::MainMenu,
+            room_id: None,
+            peers: HashMap::new(),
+            pending_requests: HashMap::new(),
+            status_message: None,
+        }
     }
 
     /// Handle input events
@@ -248,10 +266,34 @@ async fn main() -> Result<()> {
 
     // Configure logging based on debug flag
     if args.debug {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
-        debug!("Debug logging enabled");
+        let log_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".room_rs.log");
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .expect("Failed to open log file");
+
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .target(env_logger::Target::Pipe(Box::new(file)))
+            .init();
+        debug!("Debug logging enabled to file: {:?}", log_path);
     } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        let log_path = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".room_rs.log");
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .expect("Failed to open log file");
+
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .target(env_logger::Target::Pipe(Box::new(file)))
+            .init();
     }
 
     info!("Starting room.rs CLI");
@@ -487,71 +529,4 @@ fn ui(f: &mut Frame, app: &App) {
             .borders(Borders::ALL),
     );
     f.render_widget(viz, chunks[2]);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crossterm::event::KeyEvent;
-    use mockall::predicate::*;
-    use ratatui::backend::TestBackend;
-    use room_core::RoomCommand;
-    use settings_manager::Settings;
-    use std::sync::Arc;
-    use tokio::sync::mpsc;
-
-    // Test app initialization
-    #[tokio::test]
-    async fn test_app_init() {
-        let config = ConfigManager::with_file("non_existent_path.toml").unwrap();
-        // Skip the test if we can't create NetworkAdapter - we can't easily mock it
-        let app = match App::new(config).await {
-            Ok(app) => app,
-            Err(_) => return,
-        };
-
-        assert!(!app.should_quit);
-        assert_eq!(app.config.settings().username, "Anonymous");
-        assert!(matches!(app.state, AppState::MainMenu));
-    }
-
-    // Test quit event handling
-    #[tokio::test]
-    async fn test_quit_event_handling() {
-        let config = ConfigManager::with_file("non_existent_path.toml").unwrap();
-        // Skip the test if we can't create NetworkAdapter - we can't easily mock it
-        let mut app = match App::new(config).await {
-            Ok(app) => app,
-            Err(_) => return,
-        };
-
-        // Test 'q' key press
-        let q_event = Event::Key(KeyEvent::from(KeyCode::Char('q')));
-        app.handle_event(q_event).await.unwrap();
-        assert!(app.should_quit);
-
-        // Reset and test escape key
-        app.should_quit = false;
-        let esc_event = Event::Key(KeyEvent::from(KeyCode::Esc));
-        app.handle_event(esc_event).await.unwrap();
-        assert!(app.should_quit);
-    }
-
-    // Test UI rendering with test backend
-    #[test]
-    fn test_ui_rendering() {
-        // Create a test backend with a specific size
-        let backend = TestBackend::new(80, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        // Create app with custom settings
-        let mut settings = Settings::default();
-        settings.username = "TestUser".to_string();
-
-        // Skip the UI rendering test since we can't easily mock NetworkAdapter
-        return;
-
-        // Draw the UI - this won't execute due to the early return
-        // terminal.draw(|f| ui(f, &app)).unwrap();
-    }
 }
