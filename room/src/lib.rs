@@ -20,6 +20,8 @@ pub struct PeerInfo {
     pub name: String,
     /// When the peer joined the room (as system time)
     pub joined_at: std::time::SystemTime,
+    /// Whether the peer has a WebRTC connection established
+    pub webrtc_connected: bool,
 }
 
 /// Room state container
@@ -83,6 +85,7 @@ impl RoomState {
             id,
             name,
             joined_at: std::time::SystemTime::now(),
+            webrtc_connected: false,
         };
 
         self.peers.insert(id, peer_info);
@@ -212,6 +215,31 @@ impl RoomState {
     /// Check if the room has space for more peers
     pub fn has_space(&self) -> bool {
         self.peers.len() < MAX_USERS
+    }
+
+    /// Update WebRTC connection status for a peer
+    pub fn update_webrtc_status(&mut self, peer_id: PeerId, connected: bool) -> Result<(), Error> {
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.webrtc_connected = connected;
+            debug!(
+                "Updated WebRTC status for peer {} to {}",
+                peer_id, connected
+            );
+            Ok(())
+        } else {
+            Err(Error::NotFound(format!(
+                "Peer {} not found in room",
+                peer_id
+            )))
+        }
+    }
+
+    /// Check if a peer has an active WebRTC connection
+    pub fn is_webrtc_connected(&self, peer_id: &PeerId) -> bool {
+        self.peers
+            .get(peer_id)
+            .map(|peer| peer.webrtc_connected)
+            .unwrap_or(false)
     }
 }
 

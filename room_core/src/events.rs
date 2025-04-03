@@ -111,6 +111,48 @@ pub enum NetworkEvent {
         peer_id: PeerId,
     },
 
+    /// WebRTC connection state changed
+    WebRtcConnectionStateChanged {
+        /// ID of the peer
+        peer_id: PeerId,
+        /// New connection state
+        state: String,
+    },
+
+    /// WebRTC data channel opened
+    WebRtcDataChannelOpened {
+        /// ID of the peer
+        peer_id: PeerId,
+        /// Data channel label
+        label: String,
+    },
+
+    /// WebRTC data channel message received
+    WebRtcDataChannelMessageReceived {
+        /// ID of the peer
+        peer_id: PeerId,
+        /// Data channel label
+        label: String,
+        /// Message data
+        data: Vec<u8>,
+    },
+
+    /// WebRTC data channel closed
+    WebRtcDataChannelClosed {
+        /// ID of the peer
+        peer_id: PeerId,
+        /// Data channel label
+        label: String,
+    },
+
+    /// WebRTC audio track added
+    WebRtcTrackAdded {
+        /// ID of the peer
+        peer_id: PeerId,
+        /// Track ID
+        track_id: String,
+    },
+
     /// A network error occurred
     Error {
         /// The error message

@@ -271,6 +271,60 @@ impl RoomHandler {
                 error!("Network error: {}", message);
                 // Handle network error
             }
+
+            // Update to use RoomState's methods for WebRTC status
+            NetworkEvent::WebRtcConnectionStateChanged { peer_id, state } => {
+                debug!(
+                    "WebRTC connection state changed for peer {}: {}",
+                    peer_id, state
+                );
+
+                // If the connection state is "Connected", we can consider the peer fully joined
+                if state == "Connected" {
+                    debug!("WebRTC connected to peer {}", peer_id);
+                    // Mark the peer as connected
+                    let _ = self.state.update_webrtc_status(peer_id, true);
+                } else if state == "Failed" || state == "Closed" || state == "Disconnected" {
+                    debug!("WebRTC disconnected from peer {}: {}", peer_id, state);
+                    // Mark the peer as disconnected
+                    let _ = self.state.update_webrtc_status(peer_id, false);
+                }
+            }
+
+            NetworkEvent::WebRtcDataChannelOpened { peer_id, label } => {
+                debug!("WebRTC data channel opened for peer {}: {}", peer_id, label);
+
+                // Mark the peer as having data channel connectivity
+                let _ = self.state.update_webrtc_status(peer_id, true);
+            }
+
+            NetworkEvent::WebRtcDataChannelClosed { peer_id, label } => {
+                debug!("WebRTC data channel closed for peer {}: {}", peer_id, label);
+
+                // Mark the peer as having lost data channel connectivity
+                let _ = self.state.update_webrtc_status(peer_id, false);
+            }
+
+            NetworkEvent::WebRtcDataChannelMessageReceived {
+                peer_id,
+                label,
+                data,
+            } => {
+                debug!(
+                    "WebRTC data channel message received from peer {}: {} bytes",
+                    peer_id,
+                    data.len()
+                );
+
+                // Process data channel messages - could be separate protocol for audio control, chat, etc.
+                // For now just log it
+            }
+
+            NetworkEvent::WebRtcTrackAdded { peer_id, track_id } => {
+                debug!("WebRTC track added for peer {}: {}", peer_id, track_id);
+
+                // In future, we would route this to audio processing
+            }
         }
 
         Ok(())

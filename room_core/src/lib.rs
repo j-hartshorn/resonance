@@ -164,6 +164,46 @@ pub enum NetworkCommand {
         reason: Option<String>,
     },
 
+    /// Initiate WebRTC connection with peer
+    InitiateWebRtcConnection {
+        /// ID of the peer to connect to
+        peer_id: PeerId,
+    },
+
+    /// Handle received WebRTC SDP offer
+    HandleWebRtcOffer {
+        /// ID of the peer that sent the offer
+        peer_id: PeerId,
+        /// SDP offer as string
+        offer: String,
+    },
+
+    /// Handle received WebRTC SDP answer
+    HandleWebRtcAnswer {
+        /// ID of the peer that sent the answer
+        peer_id: PeerId,
+        /// SDP answer as string
+        answer: String,
+    },
+
+    /// Handle received WebRTC ICE candidate
+    HandleWebRtcIceCandidate {
+        /// ID of the peer that sent the ICE candidate
+        peer_id: PeerId,
+        /// ICE candidate as string
+        candidate: String,
+    },
+
+    /// Send message via WebRTC data channel
+    SendWebRtcDataChannelMessage {
+        /// ID of the peer to send to
+        peer_id: PeerId,
+        /// Data channel label
+        label: String,
+        /// Message data
+        data: Vec<u8>,
+    },
+
     /// Disconnect from a peer
     DisconnectPeer {
         /// ID of the peer to disconnect from

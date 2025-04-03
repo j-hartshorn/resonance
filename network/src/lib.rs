@@ -11,8 +11,10 @@ use tokio::sync::mpsc;
 pub mod events;
 pub mod phase1;
 pub mod protocol;
+pub mod webrtc_if;
 
 use phase1::Phase1Network;
+use webrtc_if::WebRtcInterface;
 
 #[cfg(test)]
 mod tests {
@@ -27,6 +29,8 @@ mod tests {
         let manager = manager.unwrap();
         assert_eq!(manager.room_id, None);
     }
+
+    mod webrtc_tests;
 }
 
 /// Network manager coordinates all networking operations
@@ -37,12 +41,18 @@ pub struct NetworkManager {
     room_id: Option<RoomId>,
     /// Phase 1 network (UDP-based secure channel)
     phase1: Phase1Network,
+    /// WebRTC interface for managing WebRTC connections
+    webrtc: WebRtcInterface,
     /// Channel for sending network events
     event_tx: mpsc::Sender<NetworkEvent>,
     /// Channel for receiving network events (for internal forwarding)
     _event_rx: mpsc::Receiver<NetworkEvent>,
     /// Channel for receiving commands from room
     command_rx: mpsc::Receiver<NetworkCommand>,
+    /// Channel for forwarding messages from WebRTC to Phase1
+    phase1_tx: mpsc::Sender<(PeerId, protocol::Phase1Message)>,
+    /// Channel for receiving messages from Phase1 to WebRTC
+    phase1_rx: mpsc::Receiver<(PeerId, protocol::Phase1Message)>,
 }
 
 impl NetworkManager {
@@ -54,6 +64,9 @@ impl NetworkManager {
         // Create command channel (will be connected later)
         let (command_tx, command_rx) = mpsc::channel(100);
 
+        // Create phase1 message channels for WebRTC signaling
+        let (phase1_tx, phase1_rx) = mpsc::channel(100);
+
         // Create Phase1Network with custom bind address
         let bind_addr = SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
@@ -61,13 +74,23 @@ impl NetworkManager {
         );
         let phase1 = Phase1Network::new(peer_id, Some(bind_addr), event_tx.clone()).await?;
 
+        // Default STUN servers
+        let stun_servers = vec!["stun:stun.l.google.com:19302".to_string()];
+
+        // Create WebRTC interface
+        let webrtc =
+            WebRtcInterface::new(peer_id, phase1_tx.clone(), event_tx.clone(), stun_servers);
+
         Ok(Self {
             peer_id,
             room_id: None,
             phase1,
+            webrtc,
             event_tx,
             _event_rx: event_rx,
             command_rx,
+            phase1_tx,
+            phase1_rx,
         })
     }
 
@@ -88,6 +111,13 @@ impl NetworkManager {
                 Some(command) = self.command_rx.recv() => {
                     if let Err(e) = self.handle_command(command).await {
                         error!("Error handling network command: {}", e);
+                    }
+                }
+
+                // Process Phase1 messages for WebRTC signaling
+                Some((peer_id, message)) = self.phase1_rx.recv() => {
+                    if let Err(e) = self.handle_phase1_message(peer_id, message).await {
+                        error!("Error handling Phase1 message for WebRTC: {}", e);
                     }
                 }
 
@@ -116,10 +146,79 @@ impl NetworkManager {
                 reason,
             } => {
                 self.send_join_response(peer_id, approved, reason).await?;
+
+                // If approved, establish WebRTC connection
+                if approved {
+                    debug!("Join approved for peer {}, initiating WebRTC", peer_id);
+                    self.initiate_webrtc_connection(peer_id).await?;
+                }
+            }
+
+            NetworkCommand::InitiateWebRtcConnection { peer_id } => {
+                self.initiate_webrtc_connection(peer_id).await?;
+            }
+
+            NetworkCommand::HandleWebRtcOffer { peer_id, offer } => {
+                self.webrtc.handle_offer(peer_id, offer).await?;
+            }
+
+            NetworkCommand::HandleWebRtcAnswer { peer_id, answer } => {
+                self.webrtc.handle_answer(peer_id, answer).await?;
+            }
+
+            NetworkCommand::HandleWebRtcIceCandidate { peer_id, candidate } => {
+                self.webrtc.handle_ice_candidate(peer_id, candidate).await?;
+            }
+
+            NetworkCommand::SendWebRtcDataChannelMessage {
+                peer_id,
+                label,
+                data,
+            } => {
+                self.webrtc
+                    .send_data_channel_message(peer_id, &label, &data)
+                    .await?;
             }
 
             NetworkCommand::DisconnectPeer { peer_id } => {
                 self.disconnect_peer(peer_id).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a Phase1 message for WebRTC signaling
+    async fn handle_phase1_message(
+        &self,
+        peer_id: PeerId,
+        message: protocol::Phase1Message,
+    ) -> Result<(), Error> {
+        // Process ApplicationMessage variant
+        if let protocol::Phase1Message::ApplicationMessage { message: app_msg } = message {
+            match app_msg {
+                protocol::ApplicationMessage::SdpOffer { offer } => {
+                    debug!("Received SDP offer from peer {}", peer_id);
+                    self.webrtc.handle_offer(peer_id, offer).await?;
+                }
+
+                protocol::ApplicationMessage::SdpAnswer { answer } => {
+                    debug!("Received SDP answer from peer {}", peer_id);
+                    self.webrtc.handle_answer(peer_id, answer).await?;
+                }
+
+                protocol::ApplicationMessage::IceCandidate { candidate } => {
+                    debug!("Received ICE candidate from peer {}", peer_id);
+                    self.webrtc.handle_ice_candidate(peer_id, candidate).await?;
+                }
+
+                _ => {
+                    // Other application messages not relevant to WebRTC
+                    debug!(
+                        "Received non-WebRTC application message from peer {}",
+                        peer_id
+                    );
+                }
             }
         }
 
@@ -163,6 +262,23 @@ impl NetworkManager {
             .await
     }
 
+    /// Initiate WebRTC connection with a peer
+    pub async fn initiate_webrtc_connection(&self, peer_id: PeerId) -> Result<(), Error> {
+        debug!("Initiating WebRTC connection with peer {}", peer_id);
+
+        // Create peer connection
+        self.webrtc.create_peer_connection(peer_id).await?;
+
+        // Create data channel for reliable messaging
+        let dc = self.webrtc.create_data_channel(peer_id, "reliable").await?;
+        debug!("Created data channel 'reliable' for peer {}", peer_id);
+
+        // Create WebRTC offer
+        self.webrtc.create_offer(peer_id).await?;
+
+        Ok(())
+    }
+
     /// Get a clone of the event sender
     pub fn get_event_sender(&self) -> mpsc::Sender<NetworkEvent> {
         self.event_tx.clone()
@@ -181,6 +297,9 @@ impl NetworkManager {
 
     /// Disconnect from a peer
     pub async fn disconnect_peer(&self, peer_id: PeerId) -> Result<(), Error> {
+        // Close WebRTC connection
+        let _ = self.webrtc.close_peer_connection(peer_id).await;
+
         // Disconnect via Phase1Network
         self.phase1.disconnect_peer(peer_id).await
     }

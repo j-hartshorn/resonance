@@ -9,6 +9,37 @@ pub const MAX_UDP_PAYLOAD_SIZE: usize = 1400;
 /// Protocol version used for compatibility checks
 pub const PROTOCOL_VERSION: u8 = 1;
 
+/// Application layer messages carried in encrypted Phase1 payloads
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ApplicationMessage {
+    /// WebRTC SDP offer for connection establishment
+    SdpOffer {
+        /// The SDP offer as a string
+        offer: String,
+    },
+
+    /// WebRTC SDP answer in response to an offer
+    SdpAnswer {
+        /// The SDP answer as a string
+        answer: String,
+    },
+
+    /// WebRTC ICE candidate for connection negotiation
+    IceCandidate {
+        /// JSON representation of the ICE candidate
+        candidate: String,
+    },
+
+    /// Request for a peer's current peer list (for mesh healing)
+    PeerListRequest,
+
+    /// Response containing a list of known peers
+    PeerListResponse {
+        /// List of peers currently in the room
+        peers: Vec<PeerInfo>,
+    },
+}
+
 /// Phase 1 messages for initial connection bootstrapping and secure channel setup
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Phase1Message {
@@ -66,6 +97,13 @@ pub enum Phase1Message {
         payload: Vec<u8>,
     },
 
+    /// Application layer message (after secure channel established)
+    /// Used for WebRTC signaling and other application-level communication
+    ApplicationMessage {
+        /// The application message
+        message: ApplicationMessage,
+    },
+
     /// Ping message to keep connections alive
     Ping {
         /// The ID of the peer sending the ping
@@ -102,6 +140,20 @@ pub fn deserialize(bytes: &[u8]) -> Result<Phase1Message, Error> {
         .map_err(|e| Error::Serialization(format!("Failed to deserialize message: {}", e)))
 }
 
+/// Serialize an application message to bytes
+pub fn serialize_application_message(message: &ApplicationMessage) -> Result<Vec<u8>, Error> {
+    bincode::serialize(message).map_err(|e| {
+        Error::Serialization(format!("Failed to serialize application message: {}", e))
+    })
+}
+
+/// Deserialize bytes to an application message
+pub fn deserialize_application_message(bytes: &[u8]) -> Result<ApplicationMessage, Error> {
+    bincode::deserialize(bytes).map_err(|e| {
+        Error::Serialization(format!("Failed to deserialize application message: {}", e))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +185,27 @@ mod tests {
                 assert_eq!(v1, v2);
                 assert_eq!(r1, r2);
                 assert_eq!(p1, p2);
+            }
+            _ => panic!("Deserialized message does not match original"),
+        }
+    }
+
+    #[test]
+    fn test_application_message_roundtrip() {
+        let original = ApplicationMessage::SdpOffer {
+            offer: "test sdp offer".to_string(),
+        };
+
+        let serialized = serialize_application_message(&original).expect("Serialization failed");
+        let deserialized =
+            deserialize_application_message(&serialized).expect("Deserialization failed");
+
+        match (original, deserialized) {
+            (
+                ApplicationMessage::SdpOffer { offer: o1 },
+                ApplicationMessage::SdpOffer { offer: o2 },
+            ) => {
+                assert_eq!(o1, o2);
             }
             _ => panic!("Deserialized message does not match original"),
         }
