@@ -153,6 +153,16 @@ pub enum NetworkEvent {
         track_id: String,
     },
 
+    /// WebRTC track received
+    WebRtcTrackReceived {
+        /// ID of the peer
+        peer_id: PeerId,
+        /// Track ID
+        track_id: String,
+        /// Track kind
+        kind: String,
+    },
+
     /// A network error occurred
     Error {
         /// The error message

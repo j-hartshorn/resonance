@@ -129,7 +129,7 @@ impl RoomHandler {
                 let event = self.state.approve_join_request(peer_id)?;
                 self.emit_event(event).await?;
 
-                // Send command to network
+                // Send approval message via Phase 1 channel
                 self.network_tx
                     .send(NetworkCommand::SendJoinResponse {
                         peer_id,
@@ -138,6 +138,17 @@ impl RoomHandler {
                     })
                     .await
                     .map_err(|e| Error::Network(format!("Failed to send join response: {}", e)))?;
+
+                // Initiate WebRTC connection (using the correct variant)
+                self.network_tx
+                    .send(NetworkCommand::InitiateWebRtcConnection { peer_id })
+                    .await
+                    .map_err(|e| {
+                        Error::Network(format!(
+                            "Failed to send InitiateWebRtcConnection command: {}",
+                            e
+                        ))
+                    })?;
             }
 
             RoomCommand::DenyJoinRequest { peer_id, reason } => {
@@ -324,6 +335,19 @@ impl RoomHandler {
                 debug!("WebRTC track added for peer {}: {}", peer_id, track_id);
 
                 // In future, we would route this to audio processing
+            }
+
+            // Handle the new track received event
+            NetworkEvent::WebRtcTrackReceived {
+                peer_id,
+                track_id,
+                kind,
+            } => {
+                debug!(
+                    "WebRTC track received for peer {}: id={}, kind={}",
+                    peer_id, track_id, kind
+                );
+                // TODO: Handle received track (e.g., route to audio pipeline)
             }
         }
 

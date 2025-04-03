@@ -193,6 +193,32 @@ impl WebRtcInterface {
             })
         }));
 
+        // Set up track handler
+        let event_sender = self.event_sender.clone();
+        let peer_id_clone = peer_id;
+        pc.on_track(Box::new(move |track, _receiver, _transceiver| {
+            let event_sender = event_sender.clone();
+            let peer_id = peer_id_clone;
+            Box::pin(async move {
+                // The track is not an Option
+                let track_id = track.id();
+                let kind = track.kind();
+                debug!(
+                    "Track received for peer {}: id={}, kind={:?}",
+                    peer_id, track_id, kind
+                );
+                // Forward track event (actual handling/reading will be elsewhere)
+                let _ = event_sender
+                    .send(NetworkEvent::WebRtcTrackReceived {
+                        peer_id,
+                        track_id,
+                        kind: format!("{:?}", kind),
+                    })
+                    .await;
+                // TODO: Add logic here or in a separate task to read from the track
+            })
+        }));
+
         // Store peer connection
         let pc_arc = Arc::new(pc);
         let mut peer_connections = self.peer_connections.lock().await;
