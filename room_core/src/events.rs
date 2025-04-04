@@ -27,11 +27,14 @@ pub enum RoomEvent {
 }
 
 /// Status of a join request
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JoinRequestStatus {
+    /// Join request is pending
     Pending,
+    /// Join request was approved
     Approved,
-    Denied,
+    /// Join request was denied
+    Denied { reason: Option<String> },
 }
 
 impl std::fmt::Display for JoinRequestStatus {
@@ -39,7 +42,13 @@ impl std::fmt::Display for JoinRequestStatus {
         match self {
             JoinRequestStatus::Pending => write!(f, "Pending"),
             JoinRequestStatus::Approved => write!(f, "Approved"),
-            JoinRequestStatus::Denied => write!(f, "Denied"),
+            JoinRequestStatus::Denied { reason } => {
+                if let Some(reason) = reason {
+                    write!(f, "Denied (Reason: {})", reason)
+                } else {
+                    write!(f, "Denied")
+                }
+            }
         }
     }
 }
@@ -163,9 +172,17 @@ pub enum NetworkEvent {
         kind: String,
     },
 
-    /// A network error occurred
+    /// Audio received from WebRTC
+    WebRtcAudioReceived {
+        /// ID of the peer
+        peer_id: PeerId,
+        /// Audio buffer
+        buffer: Vec<f32>,
+    },
+
+    /// An error occurred
     Error {
-        /// The error message
-        message: String,
+        /// Error details
+        error: String,
     },
 }

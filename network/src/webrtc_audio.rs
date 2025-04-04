@@ -109,6 +109,15 @@ impl WebRtcAudioHandler {
                     // The actual audio data will flow through process_audio
                 }
             }
+            NetworkEvent::WebRtcAudioReceived { peer_id, buffer } => {
+                debug!(
+                    "Received audio data from peer {}: {} samples",
+                    peer_id,
+                    buffer.len()
+                );
+                // Forward audio to the audio system
+                self.process_audio(peer_id, buffer).await?;
+            }
             _ => {
                 // Ignore other events
             }

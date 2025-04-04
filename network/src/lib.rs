@@ -120,6 +120,7 @@ impl NetworkManager {
     pub async fn init_audio(&mut self) -> Result<(), Error> {
         // If audio channels are set, create the audio handler
         if let (Some(audio_tx), Some(audio_rx)) = (self.audio_tx.take(), self.audio_rx.take()) {
+            // Create audio handler
             let webrtc_audio = WebRtcAudioHandler::new(self.peer_id, audio_tx, audio_rx);
 
             // Store the audio handler

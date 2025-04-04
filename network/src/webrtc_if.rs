@@ -1,6 +1,6 @@
 use crate::protocol::{ApplicationMessage, Phase1Message};
 use log::{debug, error, info, trace, warn};
-use room_core::{Error, NetworkEvent, PeerId};
+use room_core::{AudioBuffer, Error, NetworkEvent, PeerId};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -197,28 +197,9 @@ impl WebRtcInterface {
         // Set up track handler
         let event_sender = self.event_sender.clone();
         let peer_id_clone = peer_id;
-        pc.on_track(Box::new(move |track, _receiver, _transceiver| {
-            let event_sender = event_sender.clone();
-            let peer_id = peer_id_clone;
-            Box::pin(async move {
-                // The track is not an Option
-                let track_id = track.id();
-                let kind = track.kind();
-                debug!(
-                    "Track received for peer {}: id={}, kind={:?}",
-                    peer_id, track_id, kind
-                );
-                // Forward track event (actual handling/reading will be elsewhere)
-                let _ = event_sender
-                    .send(NetworkEvent::WebRtcTrackReceived {
-                        peer_id,
-                        track_id,
-                        kind: format!("{:?}", kind),
-                    })
-                    .await;
-                // TODO: Add logic here or in a separate task to read from the track
-            })
-        }));
+
+        // Use a separate function to avoid lifetime issues
+        setup_track_handler(&pc, event_sender, peer_id_clone).await;
 
         // Store peer connection
         let pc_arc = Arc::new(pc);
@@ -515,6 +496,96 @@ impl WebRtcInterface {
 
         Ok(())
     }
+}
+
+/// Set up track handler on a peer connection
+async fn setup_track_handler(
+    pc: &RTCPeerConnection,
+    event_sender: mpsc::Sender<NetworkEvent>,
+    peer_id: PeerId,
+) {
+    pc.on_track(Box::new(move |track, _receiver, _transceiver| {
+        let event_sender = event_sender.clone();
+        let peer_id = peer_id;
+        Box::pin(async move {
+            // The track is not an Option
+            let track_id = track.id();
+            let kind = track.kind();
+            debug!(
+                "Track received for peer {}: id={}, kind={:?}",
+                peer_id, track_id, kind
+            );
+
+            // Forward track event
+            let _ = event_sender
+                .send(NetworkEvent::WebRtcTrackReceived {
+                    peer_id,
+                    track_id,
+                    kind: format!("{:?}", kind),
+                })
+                .await;
+
+            // Set up track reading for audio
+            if kind.to_string().to_lowercase().contains("audio") {
+                let peer_id_track = peer_id;
+                let event_sender_track = event_sender.clone();
+                let track_clone = track.clone();
+
+                // Start a task to read samples from the track
+                tokio::spawn(async move {
+                    info!(
+                        "Starting to read from audio track for peer {}",
+                        peer_id_track
+                    );
+
+                    let buffer_limit = 960; // Default Opus frame size (20ms @ 48kHz)
+
+                    loop {
+                        // Read a packet from the track
+                        match track_clone.read_rtp().await {
+                            Ok((rtp_packet, _attributes)) => {
+                                // In a real implementation, this would go through proper
+                                // Opus decoding, but for simplicity we'll convert directly
+                                let payload = rtp_packet.payload.clone();
+
+                                // Just send a simple normalized buffer as placeholder
+                                // This isn't proper Opus decoding but enough for testing
+                                let buffer: Vec<f32> = (0..buffer_limit)
+                                    .map(|i| {
+                                        // Generate simple sine wave using payload data as seed
+                                        if i < payload.len() {
+                                            (payload[i] as f32 / 255.0) * 0.5
+                                        } else {
+                                            0.0
+                                        }
+                                    })
+                                    .collect();
+
+                                // Send audio buffer event
+                                let _ = event_sender_track
+                                    .send(NetworkEvent::WebRtcAudioReceived {
+                                        peer_id: peer_id_track,
+                                        buffer,
+                                    })
+                                    .await;
+                            }
+                            Err(err) => {
+                                if err.to_string().contains("EOF") {
+                                    // Track has ended
+                                    info!("Audio track for peer {} ended", peer_id_track);
+                                    break;
+                                } else {
+                                    error!("Error reading from audio track: {}", err);
+                                    // Small delay to avoid tight loop on error
+                                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        })
+    }));
 }
 
 #[cfg(test)]
