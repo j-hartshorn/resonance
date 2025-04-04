@@ -11,9 +11,12 @@ use tokio::sync::mpsc;
 pub mod events;
 pub mod phase1;
 pub mod protocol;
+pub mod webrtc_audio;
 pub mod webrtc_if;
 
 use phase1::Phase1Network;
+use room_core::AudioBuffer;
+use webrtc_audio::WebRtcAudioHandler;
 use webrtc_if::WebRtcInterface;
 
 #[cfg(test)]
@@ -43,6 +46,8 @@ pub struct NetworkManager {
     phase1: Phase1Network,
     /// WebRTC interface for managing WebRTC connections
     webrtc: WebRtcInterface,
+    /// WebRTC audio handler (optional)
+    webrtc_audio: Option<WebRtcAudioHandler>,
     /// Channel for sending network events
     event_tx: mpsc::Sender<NetworkEvent>,
     /// Channel for receiving network events (for internal forwarding)
@@ -53,6 +58,10 @@ pub struct NetworkManager {
     phase1_tx: mpsc::Sender<(PeerId, protocol::Phase1Message)>,
     /// Channel for receiving messages from Phase1 to WebRTC
     phase1_rx: mpsc::Receiver<(PeerId, protocol::Phase1Message)>,
+    /// Channel for sending audio to/from the audio system
+    audio_tx: Option<mpsc::Sender<(PeerId, AudioBuffer)>>,
+    /// Channel for receiving audio from the audio system
+    audio_rx: Option<mpsc::Receiver<(PeerId, AudioBuffer)>>,
 }
 
 impl NetworkManager {
@@ -86,12 +95,46 @@ impl NetworkManager {
             room_id: None,
             phase1,
             webrtc,
+            webrtc_audio: None,
             event_tx,
             _event_rx: event_rx,
             command_rx,
             phase1_tx,
             phase1_rx,
+            audio_tx: None,
+            audio_rx: None,
         })
+    }
+
+    /// Set up audio channels for WebRTC audio
+    pub fn set_audio_channels(
+        &mut self,
+        to_audio_tx: mpsc::Sender<(PeerId, AudioBuffer)>,
+        from_audio_rx: mpsc::Receiver<(PeerId, AudioBuffer)>,
+    ) {
+        self.audio_tx = Some(to_audio_tx);
+        self.audio_rx = Some(from_audio_rx);
+    }
+
+    /// Initialize WebRTC audio handler
+    pub async fn init_audio(&mut self) -> Result<(), Error> {
+        // If audio channels are set, create the audio handler
+        if let (Some(audio_tx), Some(audio_rx)) = (self.audio_tx.take(), self.audio_rx.take()) {
+            let webrtc_audio = WebRtcAudioHandler::new(self.peer_id, audio_tx, audio_rx);
+
+            // Store the audio handler
+            self.webrtc_audio = Some(webrtc_audio);
+
+            // Start the audio handler
+            if let Some(audio_handler) = &mut self.webrtc_audio {
+                audio_handler.start().await?;
+                info!("WebRTC audio handler initialized");
+            }
+        } else {
+            debug!("Audio channels not set, skipping audio initialization");
+        }
+
+        Ok(())
     }
 
     /// Get a sender for commands to this network manager
@@ -185,6 +228,14 @@ impl NetworkManager {
             }
         }
 
+        Ok(())
+    }
+
+    /// Handle a network event for audio
+    async fn handle_audio_event(&mut self, event: NetworkEvent) -> Result<(), Error> {
+        if let Some(audio_handler) = &self.webrtc_audio {
+            audio_handler.handle_event(event.clone()).await?;
+        }
         Ok(())
     }
 

@@ -13,6 +13,7 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::track::track_local::TrackLocal;
 
 /// WebRTC interface for handling WebRTC connections
 pub struct WebRtcInterface {
@@ -488,22 +489,31 @@ impl WebRtcInterface {
     /// Close a peer connection
     pub async fn close_peer_connection(&self, peer_id: PeerId) -> Result<(), Error> {
         let mut peer_connections = self.peer_connections.lock().await;
-
         if let Some(pc) = peer_connections.remove(&peer_id) {
             debug!("Closing peer connection for peer {}", peer_id);
-
-            // Close peer connection
             pc.close()
                 .await
                 .map_err(|e| Error::Network(format!("Failed to close peer connection: {}", e)))?;
-
-            Ok(())
         } else {
-            Err(Error::Network(format!(
-                "No peer connection for peer {}",
-                peer_id
-            )))
+            debug!("No peer connection found for peer {}", peer_id);
         }
+        Ok(())
+    }
+
+    /// Add a track to a peer connection
+    pub async fn add_track(
+        &self,
+        peer_id: PeerId,
+        track: Arc<dyn TrackLocal + Send + Sync>,
+    ) -> Result<(), Error> {
+        let pc = self.get_peer_connection(peer_id).await?;
+
+        debug!("Adding track to peer connection for peer {}", peer_id);
+        pc.add_track(track)
+            .await
+            .map_err(|e| Error::Network(format!("Failed to add track: {}", e)))?;
+
+        Ok(())
     }
 }
 
