@@ -33,7 +33,15 @@ impl Default for Settings {
             audio_output_device: "".to_string(),
             ice_servers: vec![
                 "stun:stun.l.google.com:19302".to_string(),
-                "stun:stun1.l.google.com:19302".to_string(),
+                "stun:stun.l.google.com:5349".to_string(),
+                "stun:stun1.l.google.com:3478".to_string(),
+                "stun:stun1.l.google.com:5349".to_string(),
+                "stun:stun2.l.google.com:19302".to_string(),
+                "stun:stun2.l.google.com:5349".to_string(),
+                "stun:stun3.l.google.com:3478".to_string(),
+                "stun:stun3.l.google.com:5349".to_string(),
+                "stun:stun4.l.google.com:19302".to_string(),
+                "stun:stun4.l.google.com:5349".to_string(),
             ],
         }
     }

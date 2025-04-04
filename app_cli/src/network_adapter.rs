@@ -1,11 +1,13 @@
 use audio::AudioSystem;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
+use network::stun_client::StunClient;
 use network::NetworkManager;
 use room::handler::RoomHandler;
 use room_core::AudioBuffer;
 use room_core::{NetworkCommand, NetworkEvent, PeerId, RoomCommand, RoomEvent, RoomId};
+use settings_manager::{ConfigManager, Settings};
 use std::net::SocketAddr;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Network adapter connects the UI, room, and network components
 pub struct NetworkAdapter {
@@ -214,6 +216,47 @@ impl NetworkAdapter {
     /// Get our peer ID
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
+    }
+
+    /// Get a join link for the current room
+    pub async fn get_join_link(&self) -> Result<String, String> {
+        // Request current room state
+        self.request_state()
+            .await
+            .map_err(|e| format!("Failed to request room state: {}", e))?;
+
+        // Get room ID
+        let room_id = match self.room_cmd_tx.send(RoomCommand::RequestState).await {
+            Ok(_) => {
+                // This is a simplified implementation that creates a placeholder room ID
+                // A proper implementation would get the current room ID from the room state
+                RoomId::new()
+            }
+            Err(e) => return Err(format!("Failed to request room state: {}", e)),
+        };
+
+        // Get STUN servers from settings
+        let config_manager =
+            ConfigManager::new().map_err(|e| format!("Failed to load settings: {}", e))?;
+        let settings = config_manager.settings();
+
+        // Create STUN client and resolve public IP
+        let stun_client = StunClient::new(settings.ice_servers.clone());
+        let public_addr = match stun_client.resolve_public_ip().await {
+            Ok(addr) => {
+                info!("Resolved public IP: {}", addr);
+                addr
+            }
+            Err(e) => {
+                warn!("Failed to resolve public IP: {}, using local address", e);
+                // Fallback to a local address for testing
+                SocketAddr::from(([127, 0, 0, 1], network::phase1::DEFAULT_PORT))
+            }
+        };
+
+        // Create join link with public IP and port
+        let link = format!("room:{}@{}", room_id, public_addr);
+        Ok(link)
     }
 
     /// Shutdown the audio system

@@ -1,23 +1,26 @@
-//! Network communication for room.rs
+//! Network module for room.rs
 //!
-//! This crate handles all networking for the application
+//! This module handles all network communication for the application,
 //! from basic UDP sockets to WebRTC connection management.
 
 use log::{debug, error, info, trace, warn};
-use room_core::{Error, NetworkCommand, NetworkEvent, PeerId, RoomId};
+use room_core::{AudioBuffer, Error, NetworkCommand, NetworkEvent, NetworkMessage, PeerId, RoomId};
+use settings_manager::ConfigManager;
 use std::net::SocketAddr;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 
 pub mod events;
 pub mod phase1;
 pub mod protocol;
+pub mod stun_client;
 pub mod webrtc_audio;
 pub mod webrtc_if;
 
-use phase1::Phase1Network;
-use room_core::AudioBuffer;
-use webrtc_audio::WebRtcAudioHandler;
-use webrtc_if::WebRtcInterface;
+use crate::phase1::Phase1Network;
+use crate::protocol::Phase1Message;
+use crate::webrtc_audio::WebRtcAudioHandler;
+use crate::webrtc_if::WebRtcInterface;
 
 #[cfg(test)]
 mod tests {
@@ -51,7 +54,7 @@ pub struct NetworkManager {
     /// Channel for sending network events
     event_tx: mpsc::Sender<NetworkEvent>,
     /// Channel for receiving network events (for internal forwarding)
-    _event_rx: mpsc::Receiver<NetworkEvent>,
+    event_rx: mpsc::Receiver<NetworkEvent>,
     /// Channel for receiving commands from room
     command_rx: mpsc::Receiver<NetworkCommand>,
     /// Channel for forwarding messages from WebRTC to Phase1
@@ -67,28 +70,29 @@ pub struct NetworkManager {
 impl NetworkManager {
     /// Create a new network manager
     pub async fn new(peer_id: PeerId) -> Result<Self, Error> {
-        // Create channels for network events
-        let (event_tx, event_rx) = mpsc::channel(100);
+        // Get settings for STUN servers
+        let config_manager = ConfigManager::new()?;
+        let settings = config_manager.settings();
 
-        // Create command channel (will be connected later)
+        // Create channels
+        let (event_tx, event_rx) = mpsc::channel(100);
+        let (phase1_tx, phase1_rx) = mpsc::channel(100);
         let (command_tx, command_rx) = mpsc::channel(100);
 
-        // Create phase1 message channels for WebRTC signaling
-        let (phase1_tx, phase1_rx) = mpsc::channel(100);
-
-        // Create Phase1Network with custom bind address
+        // Create Phase 1 network with default bind address
         let bind_addr = SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
             0, // Use port 0 to get a random available port
         );
         let phase1 = Phase1Network::new(peer_id, Some(bind_addr), event_tx.clone()).await?;
 
-        // Default STUN servers
-        let stun_servers = vec!["stun:stun.l.google.com:19302".to_string()];
-
-        // Create WebRTC interface
-        let webrtc =
-            WebRtcInterface::new(peer_id, phase1_tx.clone(), event_tx.clone(), stun_servers);
+        // Create WebRTC interface with STUN servers from settings
+        let webrtc = WebRtcInterface::new(
+            peer_id,
+            phase1_tx.clone(),
+            event_tx.clone(),
+            settings.ice_servers.clone(),
+        );
 
         Ok(Self {
             peer_id,
@@ -97,7 +101,7 @@ impl NetworkManager {
             webrtc,
             webrtc_audio: None,
             event_tx,
-            _event_rx: event_rx,
+            event_rx,
             command_rx,
             phase1_tx,
             phase1_rx,
