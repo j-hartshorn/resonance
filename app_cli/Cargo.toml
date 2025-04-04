@@ -4,22 +4,26 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0"
+anyhow = { workspace = true }
 clap = { version = "4.4", features = ["derive"] }
-crossterm = "0.27"
+crossterm = { version = "0.27", features = ["serde"] }
 dirs = "5.0"
-env_logger = "0.10"
-log = "0.4"
-ratatui = "0.24"
+env_logger = { workspace = true }
+log = { workspace = true }
+ratatui = { version = "0.26", features = ["crossterm", "serde"] }
 room_core = { path = "../room_core" }
 settings_manager = { path = "../settings_manager" }
-tokio = { version = "1.35", features = ["full"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 room = { path = "../room" }
 network = { path = "../network" }
 uuid = { version = "1.6", features = ["v4", "serde"] }
+audio = { path = "../audio" }
+audio_io = { path = "../audio_io" }
+arboard = "3"
 
 [dev-dependencies]
 mockall = "0.11"
+test-log = { workspace = true }
 
 [features]
 # Enable this feature for tests that need to mock the NetworkAdapter

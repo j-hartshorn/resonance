@@ -1,6 +1,8 @@
+use audio::AudioSystem;
 use log::{debug, error, info, warn};
 use network::NetworkManager;
 use room::handler::RoomHandler;
+use room_core::AudioBuffer;
 use room_core::{NetworkCommand, NetworkEvent, PeerId, RoomCommand, RoomEvent, RoomId};
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
@@ -13,9 +15,41 @@ pub struct NetworkAdapter {
     room_cmd_tx: mpsc::Sender<RoomCommand>,
     /// Channel for receiving room events
     room_event_rx: mpsc::Receiver<RoomEvent>,
+    /// Audio system (Optional)
+    audio_system: Option<AudioSystem>,
 }
 
 impl NetworkAdapter {
+    /// Initialize and start the audio system
+    async fn initialize_audio(
+        peer_id: PeerId,
+        audio_to_network_tx: mpsc::Sender<(PeerId, AudioBuffer)>,
+        network_to_audio_rx: mpsc::Receiver<(PeerId, AudioBuffer)>,
+    ) -> Option<AudioSystem> {
+        // Create the audio system
+        match AudioSystem::new(audio_to_network_tx, network_to_audio_rx, 1024) {
+            Ok(mut system) => {
+                info!("Audio system initialized");
+
+                // Start the audio system
+                match system.start(peer_id) {
+                    Ok(_) => {
+                        info!("Audio system started successfully");
+                        Some(system)
+                    }
+                    Err(e) => {
+                        error!("Failed to start audio system: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to initialize audio system: {}", e);
+                None
+            }
+        }
+    }
+
     /// Create a new network adapter
     pub async fn new() -> Self {
         let peer_id = PeerId::new();
@@ -25,6 +59,10 @@ impl NetworkAdapter {
         let (network_cmd_tx, network_cmd_rx) = mpsc::channel(100);
         let (network_event_tx, network_event_rx) = mpsc::channel(100);
         let (room_event_tx, room_event_rx) = mpsc::channel(100);
+
+        // Create audio channels
+        let (audio_to_network_tx, audio_to_network_rx) = mpsc::channel::<(PeerId, AudioBuffer)>(32);
+        let (network_to_audio_tx, network_to_audio_rx) = mpsc::channel::<(PeerId, AudioBuffer)>(32);
 
         // Create NetworkManager with random port binding for testing
         let bind_addr = SocketAddr::new(
@@ -40,6 +78,16 @@ impl NetworkAdapter {
             }
         };
 
+        // Set up audio channels for network
+        network_manager.set_audio_channels(network_to_audio_tx.clone(), audio_to_network_rx);
+
+        // Initialize WebRTC audio in network manager
+        if let Err(e) = network_manager.init_audio().await {
+            error!("Failed to initialize WebRTC audio: {}", e);
+        } else {
+            info!("WebRTC audio initialized");
+        }
+
         // Create RoomHandler
         let mut room_handler = RoomHandler::new(
             peer_id,
@@ -48,6 +96,13 @@ impl NetworkAdapter {
             network_event_rx,
             room_event_tx,
         );
+
+        // Set audio sender channel for the room handler
+        room_handler.set_audio_sender(network_to_audio_tx);
+
+        // Initialize audio system using the helper function
+        let audio_system =
+            Self::initialize_audio(peer_id, audio_to_network_tx, network_to_audio_rx).await;
 
         // Start NetworkManager in a background task
         tokio::spawn(async move {
@@ -68,6 +123,7 @@ impl NetworkAdapter {
             peer_id,
             room_cmd_tx,
             room_event_rx,
+            audio_system,
         }
     }
 
@@ -158,5 +214,13 @@ impl NetworkAdapter {
     /// Get our peer ID
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
+    }
+
+    /// Shutdown the audio system
+    pub fn shutdown(&mut self) {
+        if let Some(audio_system) = &self.audio_system {
+            info!("Shutting down audio system");
+            audio_system.stop();
+        }
     }
 }

@@ -9,6 +9,7 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -493,6 +494,23 @@ impl WebRtcInterface {
         pc.add_track(track)
             .await
             .map_err(|e| Error::Network(format!("Failed to add track: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Initiate WebRTC connection with a peer
+    pub async fn initiate_webrtc_connection(&self, peer_id: PeerId) -> Result<(), Error> {
+        debug!("Initiating WebRTC connection with peer {}", peer_id);
+
+        // Create peer connection
+        self.create_peer_connection(peer_id).await?;
+
+        // Create data channel for reliable messaging
+        let dc = self.create_data_channel(peer_id, "reliable").await?;
+        debug!("Created data channel 'reliable' for peer {}", peer_id);
+
+        // Create WebRTC offer
+        self.create_offer(peer_id).await?;
 
         Ok(())
     }

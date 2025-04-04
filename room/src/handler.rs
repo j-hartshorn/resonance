@@ -1,6 +1,6 @@
 use crate::commands::{NetworkCommand, RoomCommand};
 use crate::{RoomEvent, RoomState};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use room_core::{Error, NetworkEvent, PeerId, RoomId};
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
@@ -19,6 +19,8 @@ pub struct RoomHandler {
     network_rx: mpsc::Receiver<NetworkEvent>,
     /// Channel for sending room events to the UI
     event_tx: mpsc::Sender<RoomEvent>,
+    /// Channel for sending audio data to the audio system
+    audio_tx: Option<mpsc::Sender<(PeerId, room_core::AudioBuffer)>>,
 }
 
 impl RoomHandler {
@@ -37,7 +39,14 @@ impl RoomHandler {
             network_tx,
             network_rx,
             event_tx,
+            audio_tx: None,
         }
+    }
+
+    /// Set the audio sender channel
+    pub fn set_audio_sender(&mut self, sender: mpsc::Sender<(PeerId, room_core::AudioBuffer)>) {
+        self.audio_tx = Some(sender);
+        info!("Audio sender channel set in RoomHandler");
     }
 
     /// Run the room handler, processing commands and events
@@ -278,8 +287,8 @@ impl RoomHandler {
                 // Handle successful auth
             }
 
-            NetworkEvent::Error { message } => {
-                error!("Network error: {}", message);
+            NetworkEvent::Error { error } => {
+                error!("Network error: {}", error);
                 // Handle network error
             }
 
@@ -348,6 +357,24 @@ impl RoomHandler {
                     peer_id, track_id, kind
                 );
                 // TODO: Handle received track (e.g., route to audio pipeline)
+            }
+
+            NetworkEvent::WebRtcAudioReceived { peer_id, buffer } => {
+                debug!(
+                    "WebRTC audio received from peer {}: {} samples",
+                    peer_id,
+                    buffer.len()
+                );
+                // Forward audio buffer to audio processing pipeline
+                if let Some(audio_tx) = &self.audio_tx {
+                    if let Err(e) = audio_tx.send((peer_id, buffer)).await {
+                        error!("Failed to send audio buffer to audio system: {}", e);
+                    } else {
+                        trace!("Audio buffer forwarded to audio system");
+                    }
+                } else {
+                    debug!("Audio channel not set, audio data discarded");
+                }
             }
         }
 

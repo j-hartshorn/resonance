@@ -318,15 +318,15 @@ impl NetworkManager {
     pub async fn initiate_webrtc_connection(&self, peer_id: PeerId) -> Result<(), Error> {
         debug!("Initiating WebRTC connection with peer {}", peer_id);
 
-        // Create peer connection
-        self.webrtc.create_peer_connection(peer_id).await?;
+        // Use the WebRTC interface to handle connection setup
+        self.webrtc.initiate_webrtc_connection(peer_id).await?;
 
-        // Create data channel for reliable messaging
-        let dc = self.webrtc.create_data_channel(peer_id, "reliable").await?;
-        debug!("Created data channel 'reliable' for peer {}", peer_id);
-
-        // Create WebRTC offer
-        self.webrtc.create_offer(peer_id).await?;
+        // Log whether audio is enabled
+        if self.audio_tx.is_some() {
+            info!("Audio channels are set up for peer {}", peer_id);
+        } else {
+            warn!("Audio channels are NOT set up for peer {}", peer_id);
+        }
 
         Ok(())
     }

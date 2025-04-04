@@ -6,6 +6,7 @@ mod network_adapter;
 mod tests;
 
 use anyhow::Result;
+use arboard::Clipboard;
 use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -16,7 +17,7 @@ use log::{debug, error, info, trace, warn};
 use network_adapter::NetworkAdapter;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
     Frame, Terminal,
@@ -202,6 +203,24 @@ impl App {
                     self.status_message = Some(format!("Denied join request from {}", peer_id));
                 }
             }
+            KeyCode::Char('g') => match self.network_adapter.get_join_link().await {
+                Ok(link) => match Clipboard::new() {
+                    Ok(mut clipboard) => {
+                        if let Err(e) = clipboard.set_text(link.clone()) {
+                            self.status_message = Some(format!("Error copying link: {}", e));
+                        } else {
+                            self.status_message =
+                                Some("Join link copied to clipboard!".to_string());
+                        }
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Error accessing clipboard: {}", e));
+                    }
+                },
+                Err(e) => {
+                    self.status_message = Some(format!("Error getting join link: {}", e));
+                }
+            },
             _ => {}
         }
         Ok(())
@@ -353,6 +372,9 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Shutdown audio system
+    app.network_adapter.shutdown();
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(
@@ -368,165 +390,107 @@ async fn main() -> Result<()> {
 }
 
 fn ui(f: &mut Frame, app: &App) {
-    // Create three main sections with equal size
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
-        .constraints([
-            Constraint::Percentage(20), // Menu/Status area
-            Constraint::Percentage(40), // Peers area
-            Constraint::Percentage(40), // Visualization area
-        ])
+        .constraints(
+            [
+                Constraint::Length(3), // Top status/menu area
+                Constraint::Min(0),    // Main content (peers/viz)
+                Constraint::Length(1), // Bottom help text
+            ]
+            .as_ref(),
+        )
         .split(f.size());
 
-    // Menu/Status area
-    let menu_text = match &app.state {
-        AppState::MainMenu => Text::from(vec![
-            Line::from(vec![
-                Span::styled("room.rs", Style::default().fg(Color::Green)),
-                Span::raw(" - Secure, spatial audio chat"),
-            ]),
-            Line::raw(""),
-            Line::from(vec![
-                Span::raw("Press "),
-                Span::styled("c", Style::default().fg(Color::Yellow)),
-                Span::raw(" to create a room"),
-            ]),
-            Line::from(vec![
-                Span::raw("Press "),
-                Span::styled("j", Style::default().fg(Color::Yellow)),
-                Span::raw(" to join a room"),
-            ]),
-            Line::from(vec![
-                Span::raw("Press "),
-                Span::styled("q", Style::default().fg(Color::Yellow)),
-                Span::raw(" to quit"),
-            ]),
-        ]),
-        AppState::JoiningRoom { link } => {
-            let mut text = Text::from(vec![
-                Line::from(vec![Span::styled(
-                    "Join Room",
-                    Style::default().fg(Color::Green),
-                )]),
-                Line::raw(""),
-                Line::from(vec![
-                    Span::raw("Enter room link: "),
-                    Span::styled(link, Style::default().fg(Color::Yellow)),
-                ]),
-                Line::from(vec![Span::raw("Format: room:<room_id>@<host>:<port>")]),
-                Line::raw(""),
-                Line::from(vec![
-                    Span::raw("Press "),
-                    Span::styled("Enter", Style::default().fg(Color::Yellow)),
-                    Span::raw(" to join, "),
-                    Span::styled("Esc", Style::default().fg(Color::Yellow)),
-                    Span::raw(" to cancel"),
-                ]),
-            ]);
+    // --- Top Status/Menu ---
+    let status_text = match &app.state {
+        AppState::MainMenu => "Main Menu".to_string(),
+        AppState::CreatingRoom => "Creating Room...".to_string(),
+        AppState::JoiningRoom { link } => format!("Joining Room | Link: {}", link),
+        AppState::InRoom => format!(
+            "In Room: {} | Peers: {}",
+            app.room_id.map_or_else(
+                || "Unknown".to_string(),
+                |id| format!("{}", id) // Adjust formatting as needed
+            ),
+            app.peers.len()
+        ),
+    };
+    let status_paragraph =
+        Paragraph::new(status_text).block(Block::default().borders(Borders::ALL).title("Status"));
+    f.render_widget(status_paragraph, chunks[0]);
 
-            // Add status message if any
-            if let Some(status) = &app.status_message {
-                text.lines.push(Line::raw(""));
-                text.lines.push(Line::from(vec![Span::styled(
-                    status,
-                    Style::default().fg(Color::Red),
-                )]));
-            }
+    // --- Main Content ---
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
+        .split(chunks[1]);
 
-            text
+    // Peer List
+    let peer_items: Vec<ListItem> = app
+        .peers
+        .iter()
+        .map(|(id, name)| {
+            let content = format!("{} ({})", name, id);
+            ListItem::new(Span::raw(content))
+        })
+        .collect();
+    let peer_list = List::new(peer_items)
+        .block(Block::default().borders(Borders::ALL).title("Peers"))
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+    f.render_widget(peer_list, main_chunks[0]);
+
+    // Placeholder for Visualization
+    let viz_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Visualization (Placeholder)");
+    f.render_widget(viz_block, main_chunks[1]);
+
+    // --- Bottom Help Text / Status Message ---
+    let mut help_spans = vec![];
+    match app.state {
+        AppState::MainMenu => {
+            help_spans.push(Span::styled("[C]", Style::default().fg(Color::Yellow)));
+            help_spans.push(Span::raw("reate Room | "));
+            help_spans.push(Span::styled("[J]", Style::default().fg(Color::Yellow)));
+            help_spans.push(Span::raw("oin Room | "));
+            help_spans.push(Span::styled("[Q]", Style::default().fg(Color::Yellow)));
+            help_spans.push(Span::raw("uit"));
+        }
+        AppState::JoiningRoom { .. } => {
+            help_spans.push(Span::raw("Enter Link | "));
+            help_spans.push(Span::styled("[Enter]", Style::default().fg(Color::Yellow)));
+            help_spans.push(Span::raw(" to Join | "));
+            help_spans.push(Span::styled("[Esc]", Style::default().fg(Color::Yellow)));
+            help_spans.push(Span::raw(" to Cancel"));
         }
         AppState::InRoom => {
-            let mut text = Text::from(vec![
-                Line::from(vec![Span::styled(
-                    "In Room",
-                    Style::default().fg(Color::Green),
-                )]),
-                Line::raw(""),
-                Line::from(vec![
-                    Span::raw("Press "),
-                    Span::styled("Esc", Style::default().fg(Color::Yellow)),
-                    Span::raw(" to leave room"),
-                ]),
-            ]);
-
-            // Show pending join requests if any
             if !app.pending_requests.is_empty() {
-                text.lines.push(Line::raw(""));
-                text.lines.push(Line::from(vec![Span::styled(
-                    format!("Pending join requests: {}", app.pending_requests.len()),
-                    Style::default().fg(Color::Yellow),
-                )]));
-                text.lines.push(Line::from(vec![
-                    Span::raw("Press "),
-                    Span::styled("a", Style::default().fg(Color::Green)),
-                    Span::raw(" to approve, "),
-                    Span::styled("d", Style::default().fg(Color::Red)),
-                    Span::raw(" to deny"),
-                ]));
+                help_spans.push(Span::styled("[A]", Style::default().fg(Color::Green)));
+                help_spans.push(Span::raw("pprove Join | "));
+                help_spans.push(Span::styled("[D]", Style::default().fg(Color::Red)));
+                help_spans.push(Span::raw("eny Join | "));
             }
-
-            // Add status message if any
-            if let Some(status) = &app.status_message {
-                text.lines.push(Line::raw(""));
-                text.lines.push(Line::from(vec![Span::styled(
-                    status,
-                    Style::default().fg(Color::Yellow),
-                )]));
-            }
-
-            text
+            help_spans.push(Span::styled("[G]", Style::default().fg(Color::Yellow))); // Add G option
+            help_spans.push(Span::raw(" Copy Join Link | ")); // Add G option text
+            help_spans.push(Span::styled("[Esc]", Style::default().fg(Color::Yellow)));
+            help_spans.push(Span::raw(" to Leave Room"));
         }
-        AppState::CreatingRoom => Text::from(vec![
-            Line::from(vec![Span::styled(
-                "Creating Room",
-                Style::default().fg(Color::Green),
-            )]),
-            Line::raw(""),
-            Line::from(vec![Span::styled(
-                app.status_message.as_deref().unwrap_or("Please wait..."),
-                Style::default().fg(Color::Yellow),
-            )]),
-        ]),
+        AppState::CreatingRoom => {
+            help_spans.push(Span::raw("Creating room..."));
+        }
+    }
+
+    let bottom_text = if let Some(msg) = &app.status_message {
+        Line::from(vec![
+            Span::styled("Status: ", Style::default().fg(Color::Cyan)),
+            Span::raw(msg),
+        ])
+    } else {
+        Line::from(help_spans)
     };
 
-    let menu =
-        Paragraph::new(menu_text).block(Block::default().title("Menu").borders(Borders::ALL));
-    f.render_widget(menu, chunks[0]);
-
-    // Peers area
-    let peers_widget = match &app.state {
-        AppState::InRoom => {
-            // Create list items for each peer
-            let peers_list: Vec<ListItem> = app
-                .peers
-                .iter()
-                .map(|(peer_id, name)| {
-                    let text = if *peer_id == app.network_adapter.peer_id() {
-                        format!("{} (You)", name)
-                    } else {
-                        name.clone()
-                    };
-
-                    ListItem::new(text)
-                })
-                .collect();
-
-            List::new(peers_list).block(Block::default().title("Peers").borders(Borders::ALL))
-        }
-        _ => {
-            // Placeholder when not in a room
-            List::new(vec![ListItem::new("Not in a room")])
-                .block(Block::default().title("Peers").borders(Borders::ALL))
-        }
-    };
-    f.render_widget(peers_widget, chunks[1]);
-
-    // Visualization area (placeholder)
-    let viz = Paragraph::new(format!("User: {}", app.config.settings().username)).block(
-        Block::default()
-            .title("Audio Visualization")
-            .borders(Borders::ALL),
-    );
-    f.render_widget(viz, chunks[2]);
+    let help_paragraph = Paragraph::new(bottom_text);
+    f.render_widget(help_paragraph, chunks[2]);
 }

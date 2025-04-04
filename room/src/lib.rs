@@ -182,7 +182,8 @@ impl RoomState {
         }
 
         // Update the status
-        self.pending_joins.insert(id, JoinRequestStatus::Denied);
+        self.pending_joins
+            .insert(id, JoinRequestStatus::Denied { reason: None });
         info!(
             "Denied join request from peer {} for room {}",
             id, self.room_id
@@ -190,7 +191,7 @@ impl RoomState {
 
         Ok(RoomEvent::JoinRequestStatusChanged(
             id,
-            JoinRequestStatus::Denied,
+            JoinRequestStatus::Denied { reason: None },
         ))
     }
 
@@ -456,9 +457,15 @@ mod tests {
 
         assert_eq!(
             event,
-            RoomEvent::JoinRequestStatusChanged(peer_id, JoinRequestStatus::Denied)
+            RoomEvent::JoinRequestStatusChanged(
+                peer_id,
+                JoinRequestStatus::Denied { reason: None }
+            )
         );
-        assert_eq!(room.pending_joins()[&peer_id], JoinRequestStatus::Denied);
+        assert_eq!(
+            room.pending_joins()[&peer_id],
+            JoinRequestStatus::Denied { reason: None }
+        );
     }
 
     #[test]
@@ -536,7 +543,19 @@ mod tests {
     fn test_join_request_status_display() {
         assert_eq!(format!("{}", JoinRequestStatus::Pending), "Pending");
         assert_eq!(format!("{}", JoinRequestStatus::Approved), "Approved");
-        assert_eq!(format!("{}", JoinRequestStatus::Denied), "Denied");
+        assert_eq!(
+            format!("{}", JoinRequestStatus::Denied { reason: None }),
+            "Denied"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                JoinRequestStatus::Denied {
+                    reason: Some("Test".to_string())
+                }
+            ),
+            "Denied (Reason: Test)"
+        );
     }
 }
 
