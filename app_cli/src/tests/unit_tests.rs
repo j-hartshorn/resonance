@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 async fn test_app_init() {
     let config = ConfigManager::with_file("non_existent_path.toml").unwrap();
     // Skip the test if we can't create NetworkAdapter - we can't easily mock it
-    let app = match App::new(config).await {
+    let app = match App::new(config, false).await {
         Ok(app) => app,
         Err(_) => return,
     };
@@ -27,7 +27,7 @@ async fn test_app_init() {
 async fn test_quit_event_handling() {
     let config = ConfigManager::with_file("non_existent_path.toml").unwrap();
     // Skip the test if we can't create NetworkAdapter - we can't easily mock it
-    let mut app = match App::new(config).await {
+    let mut app = match App::new(config, false).await {
         Ok(app) => app,
         Err(_) => return,
     };

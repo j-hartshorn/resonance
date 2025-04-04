@@ -6,9 +6,10 @@ edition = "2021"
 [dependencies]
 room_core = { path = "../room_core" }
 tokio = { workspace = true }
-cpal = "0.15"                 # Added from original root Cargo.toml
+cpal = "0.15"                         # Added from original root Cargo.toml
 log = { workspace = true }
 anyhow = { workspace = true }
+rand = "0.8"                          # For test audio generation
 
 [dev-dependencies]
 mockall = { workspace = true }    # Might need mocking for cpal

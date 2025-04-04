@@ -424,6 +424,7 @@ dependencies = [
  "cpal",
  "log",
  "mockall",
+ "rand",
  "room_core",
  "test-log",
  "tokio",

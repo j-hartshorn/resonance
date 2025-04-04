@@ -37,6 +37,14 @@ struct Args {
     /// Enable debug logging
     #[clap(short, long)]
     debug: bool,
+
+    /// Enable test audio mode (uses generated audio instead of microphone)
+    #[clap(long)]
+    test_audio: bool,
+
+    /// Path to the log file (default is a timestamped file in the system temp directory)
+    #[clap(long)]
+    log_file: Option<String>,
 }
 
 /// Application state for the UI
@@ -72,12 +80,14 @@ struct App {
     pending_requests: HashMap<PeerId, ()>,
     /// Any status or error message to display
     status_message: Option<String>,
+    /// Using test audio mode
+    test_audio: bool,
 }
 
 impl App {
-    async fn new(config: ConfigManager) -> Result<Self> {
-        // Create network adapter
-        let network_adapter = NetworkAdapter::new().await;
+    async fn new(config: ConfigManager, test_audio: bool) -> Result<Self> {
+        // Create network adapter with test audio mode if requested
+        let network_adapter = NetworkAdapter::new_with_options(test_audio).await;
 
         Ok(Self {
             should_quit: false,
@@ -88,6 +98,7 @@ impl App {
             peers: HashMap::new(),
             pending_requests: HashMap::new(),
             status_message: None,
+            test_audio,
         })
     }
 
@@ -103,6 +114,7 @@ impl App {
             peers: HashMap::new(),
             pending_requests: HashMap::new(),
             status_message: None,
+            test_audio: false,
         }
     }
 
@@ -281,99 +293,93 @@ impl App {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse command line arguments
     let args = Args::parse();
 
-    // Configure logging based on debug flag
-    if args.debug {
-        let log_path = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".room_rs.log");
+    // Configure file-based logger
+    let log_level = if args.debug { "debug" } else { "info" };
 
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .expect("Failed to open log file");
+    // Set up log file path - either user-specified or generated with timestamp
+    let log_path = match &args.log_file {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            // Create a log file with timestamp in the system temp directory
+            let log_filename = format!(
+                "room_rs_{}.log",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            );
+            std::env::temp_dir().join(log_filename)
+        }
+    };
 
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
-            .target(env_logger::Target::Pipe(Box::new(file)))
-            .init();
-        debug!("Debug logging enabled to file: {:?}", log_path);
-    } else {
-        let log_path = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".room_rs.log");
-
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .expect("Failed to open log file");
-
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-            .target(env_logger::Target::Pipe(Box::new(file)))
-            .init();
+    // Create directory for log file if it doesn't exist
+    if let Some(parent) = log_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("Failed to create log directory: {}", e))?;
+        }
     }
 
-    info!("Starting room.rs CLI");
+    // Set up the file logger
+    let log_file = std::fs::File::create(&log_path)
+        .map_err(|e| anyhow::anyhow!("Failed to create log file: {}", e))?;
 
-    // Setup terminal
+    // Configure env_logger to write to the file
+    env_logger::Builder::new()
+        .parse_filters(log_level)
+        .target(env_logger::Target::Pipe(Box::new(log_file)))
+        .init();
+
+    info!("Starting room.rs (test_audio: {})", args.test_audio);
+    // Don't log the file path to avoid it appearing in the UI
+    debug!("Debug logging enabled");
+
+    // Set up config manager
+    let config_manager = ConfigManager::new()?;
+
+    // Set up terminal UI
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create app
-    let config = match ConfigManager::new() {
-        Ok(config) => config,
-        Err(e) => {
-            error!("Failed to load config: {}", e);
-            disable_raw_mode()?;
-            execute!(
-                terminal.backend_mut(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            )?;
-            terminal.show_cursor()?;
-            return Err(anyhow::anyhow!("Failed to load config: {}", e));
-        }
-    };
-    let mut app = App::new(config).await?;
+    // Create app state
+    let mut app = App::new(config_manager, args.test_audio).await?;
 
     // Main event loop
     let tick_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
 
     loop {
-        // Process room events
-        app.process_events().await?;
-
         // Render the UI
         terminal.draw(|f| ui(f, &app))?;
 
-        // Poll for events
+        // Check for events with timeout
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
-            .unwrap_or_else(|| Duration::from_millis(0));
+            .unwrap_or_else(|| Duration::from_secs(0));
 
-        if event::poll(timeout)? {
-            let event = event::read()?;
-            app.handle_event(event).await?;
+        if crossterm::event::poll(timeout)? {
+            app.handle_event(event::read()?).await?;
         }
 
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
-        }
+        // Process any room events
+        app.process_events().await?;
 
-        // Check if we should quit
+        // Check if it's time to quit
         if app.should_quit {
             break;
         }
-    }
 
-    // Shutdown audio system
-    app.network_adapter.shutdown();
+        // Tick for regular updates
+        if last_tick.elapsed() >= tick_rate {
+            last_tick = Instant::now();
+        }
+    }
 
     // Restore terminal
     disable_raw_mode()?;
@@ -384,8 +390,7 @@ async fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    info!("Exiting room.rs CLI");
-
+    info!("Exiting room.rs");
     Ok(())
 }
 

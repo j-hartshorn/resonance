@@ -1,4 +1,5 @@
 use audio::AudioSystem;
+use audio_io::AudioDevice;
 use log::{debug, error, info, trace, warn};
 use network::stun_client::StunClient;
 use network::NetworkManager;
@@ -7,6 +8,7 @@ use room_core::AudioBuffer;
 use room_core::{NetworkCommand, NetworkEvent, PeerId, RoomCommand, RoomEvent, RoomId};
 use settings_manager::{ConfigManager, Settings};
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 /// Network adapter connects the UI, room, and network components
@@ -27,26 +29,44 @@ impl NetworkAdapter {
         peer_id: PeerId,
         audio_to_network_tx: mpsc::Sender<(PeerId, AudioBuffer)>,
         network_to_audio_rx: mpsc::Receiver<(PeerId, AudioBuffer)>,
+        test_mode: bool,
     ) -> Option<AudioSystem> {
-        // Create the audio system
-        match AudioSystem::new(audio_to_network_tx, network_to_audio_rx, 1024) {
-            Ok(mut system) => {
-                info!("Audio system initialized");
-
-                // Start the audio system
-                match system.start(peer_id) {
-                    Ok(_) => {
-                        info!("Audio system started successfully");
-                        Some(system)
-                    }
-                    Err(e) => {
-                        error!("Failed to start audio system: {}", e);
-                        None
-                    }
+        // Create the audio device
+        let audio_device = if test_mode {
+            info!("Using test mode audio device");
+            Arc::new(Mutex::new(AudioDevice::new_test_mode()))
+        } else {
+            match AudioDevice::new() {
+                Ok(device) => Arc::new(Mutex::new(device)),
+                Err(e) => {
+                    error!("Failed to initialize audio device: {}", e);
+                    return None;
                 }
             }
+        };
+
+        // Set up the audio system with our device
+        let mut system =
+            match create_audio_system(audio_device, audio_to_network_tx, network_to_audio_rx, 1024)
+            {
+                Ok(system) => {
+                    info!("Audio system initialized");
+                    system
+                }
+                Err(e) => {
+                    error!("Failed to initialize audio system: {}", e);
+                    return None;
+                }
+            };
+
+        // Start the audio system
+        match system.start(peer_id) {
+            Ok(_) => {
+                info!("Audio system started successfully");
+                Some(system)
+            }
             Err(e) => {
-                error!("Failed to initialize audio system: {}", e);
+                error!("Failed to start audio system: {}", e);
                 None
             }
         }
@@ -54,6 +74,11 @@ impl NetworkAdapter {
 
     /// Create a new network adapter
     pub async fn new() -> Self {
+        Self::new_with_options(false).await
+    }
+
+    /// Create a new network adapter with options
+    pub async fn new_with_options(test_audio: bool) -> Self {
         let peer_id = PeerId::new();
 
         // Create channels
@@ -103,8 +128,13 @@ impl NetworkAdapter {
         room_handler.set_audio_sender(network_to_audio_tx);
 
         // Initialize audio system using the helper function
-        let audio_system =
-            Self::initialize_audio(peer_id, audio_to_network_tx, network_to_audio_rx).await;
+        let audio_system = Self::initialize_audio(
+            peer_id,
+            audio_to_network_tx,
+            network_to_audio_rx,
+            test_audio,
+        )
+        .await;
 
         // Start NetworkManager in a background task
         tokio::spawn(async move {
@@ -266,4 +296,15 @@ impl NetworkAdapter {
             audio_system.stop();
         }
     }
+}
+
+/// Helper function to create an audio system with a custom audio device
+fn create_audio_system(
+    audio_device: Arc<Mutex<AudioDevice>>,
+    webrtc_sender: mpsc::Sender<(PeerId, AudioBuffer)>,
+    webrtc_receiver: mpsc::Receiver<(PeerId, AudioBuffer)>,
+    buffer_size: usize,
+) -> Result<AudioSystem, room_core::Error> {
+    // Use the new with_audio_device method
+    AudioSystem::with_audio_device(audio_device, webrtc_sender, webrtc_receiver, buffer_size)
 }

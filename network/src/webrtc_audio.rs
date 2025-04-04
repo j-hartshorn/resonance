@@ -52,8 +52,6 @@ impl WebRtcAudioHandler {
             info!("Starting WebRTC audio processor task");
             let mut audio_receiver = audio_receiver;
             while let Some((target_peer, buffer)) = audio_receiver.recv().await {
-                debug!("Processing audio buffer for peer {}", target_peer);
-
                 // Store latest buffer for this peer
                 {
                     let mut buffers = peer_buffers.lock().unwrap();

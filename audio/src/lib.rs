@@ -55,6 +55,32 @@ impl AudioSystem {
         })
     }
 
+    /// Create a new audio system with a pre-configured audio device
+    pub fn with_audio_device(
+        audio_device: Arc<Mutex<AudioDevice>>,
+        webrtc_sender: mpsc::Sender<(PeerId, AudioBuffer)>,
+        webrtc_receiver: mpsc::Receiver<(PeerId, AudioBuffer)>,
+        buffer_size: usize,
+    ) -> Result<Self, Error> {
+        // Create channel for playback
+        let (playback_sender, playback_receiver) = mpsc::channel(32);
+
+        // Start playback using the provided audio device
+        {
+            let mut device = audio_device.lock().unwrap();
+            device.start_playback(playback_receiver)?;
+        }
+
+        Ok(Self {
+            audio_device,
+            webrtc_sender,
+            webrtc_receiver: Some(webrtc_receiver),
+            playback_sender,
+            buffer_size,
+            peer_buffers: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
     /// Start audio capture and processing
     pub fn start(&mut self, local_peer_id: PeerId) -> Result<(), Error> {
         // Create channel for capture
